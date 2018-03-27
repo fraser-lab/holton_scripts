@@ -17,8 +17,11 @@ set ksol = 0.35824
 
 # solvent mask options
 set vdwprobe = 1.1
-set ionprobe = 0.5
-set rshrink = 0.5
+set ionprobe = 0.6
+set rshrink = 0.2
+
+# scale for size of kicks
+set drykick_scale = 1.0
 
 # number of refmac cycles to refine
 set ncyc_ideal = 5
@@ -84,21 +87,45 @@ mapout=${mapout} mtzout=${mtzout}
 EOF
 
 set fastmp = ${tempfile}
-if("$CLUSTER" != "") set fastmp = "./"
+if("$CLUSTER" != "") then
+    set fastmp = "./"
+endif
 
 # create the refmac script we will run on each cpu
 cat << EOF-script >! refmac_cpu.com
 #! /bin/tcsh -f
+#  SGE instructions
+#\$ -S /bin/tcsh                    #-- the shell for the job
+#\$ -o $pwd                         #-- output directory 
+#\$ -e $pwd                         #-- error directory 
+#\$ -cwd                            #-- job should start in your working directory
+#\$ -r n                            #-- if job crashes, do not restart
+#\$ -j y                            #-- tell the system that the STDERR and STDOUT should be joined
+#\$ -l mem_free=1G                  #-- submits on nodes with enough free memory (required)
+#\$ -l arch=linux-x64               #-- SGE resources (CPU type)
+#\$ -l netapp=1G,scratch=1G         #-- SGE resources (home and scratch disks)
+#\$ -l h_rt=01:00:00                #-- runtime limit (see above; this requests 24 hours)
+#\$ -t 1-$seeds                     #-- the number of tasks
+
 set seed = \$1
+
+if(\$?SGE_TASK_ID) then
+    set seed = \$SGE_TASK_ID
+endif
+if(! \$?CCP4) then
+    source ${CBIN}/ccp4.setup-csh
+endif
+set path = ( . \$path )
+set tempfile = ${tempfile}\$\$
 
 # mess it up
 cat $pdbfile |\
-jigglepdb.awk -v shift=byB -v seed=\$seed |\
-awk '! /^ATOM|^HETAT/ || substr(\$0,55)+0>0' >! ${tempfile}seed\${seed}.pdb
+jigglepdb.awk -v shift=byB -v seed=\$seed -v drykick_scale=$drykick_scale |\
+awk '! /^ATOM|^HETAT/ || substr(\$0,55)+0>0' >! \${tempfile}seed\${seed}.pdb
 
 # clean it up
-refmac5 xyzin ${tempfile}seed\${seed}.pdb $LIBSTUFF \
-        xyzout ${tempfile}seed\${seed}minimized.pdb << EOF-refmac
+refmac5 xyzin \${tempfile}seed\${seed}.pdb $LIBSTUFF \
+        xyzout \${tempfile}seed\${seed}minimized.pdb << EOF-refmac
 vdwrestraints 0
 $otheropts
 refi type ideal
@@ -106,22 +133,30 @@ ncyc $ncyc_ideal
 EOF-refmac
 
 # forget it if it didnt minimize
-if(! -e ${tempfile}seed\${seed}minimized.pdb) then
-    cp ${tempfile}seed\${seed}.pdb ${tempfile}seed\${seed}minimized.pdb
+if(! -e \${tempfile}seed\${seed}minimized.pdb) then
+    cp \${tempfile}seed\${seed}.pdb \${tempfile}seed\${seed}minimized.pdb
 endif
 
 # map it out
-refmac5 xyzin ${tempfile}seed\${seed}minimized.pdb \
-        xyzout ${tempfile}seed\${seed}out.pdb \
+refmac5 xyzin \${tempfile}seed\${seed}minimized.pdb \
+        xyzout \${tempfile}seed\${seed}out.pdb \
         hklin $mtzfile  $LIBSTUFF \
     mskout ${fastmp}mask_seed\${seed}.map \
-    hklout ${tempfile}seed\${seed}out.mtz << EOF-refmac
+    hklout \${tempfile}seed\${seed}out.mtz << EOF-refmac
 vdwrestraints 0
 $otheropts
 ncyc $ncyc_data
 solvent vdwprobe $vdwprobe ionprobe $ionprobe rshrink $rshrink
 solvent yes
 EOF-refmac
+
+# clean up
+if(! $debug && -e ${fastmp}mask_seed\${seed}.map && "$CLUSTER" != "") then
+    rm -f \${tempfile}seed\${seed}.pdb  >& /dev/null
+    rm -f \${tempfile}seed\${seed}minimized.pdb  >& /dev/null
+    rm -f \${tempfile}seed\${seed}out.pdb >& /dev/null
+    rm -f \${tempfile}seed\${seed}out.mtz  >& /dev/null
+endif
 
 # signal that map is ready
 touch ${fastmp}seed\${seed}done.txt
@@ -131,7 +166,27 @@ chmod a+x refmac_cpu.com
 
 
 # launch refmac jobs in parallel
-if("$CLUSTER" == "TORQ") goto launch_qsub
+# launch jobs on a torq cluster, like pxproc
+if("$CLUSTER" == "TORQ") then
+    # use a TORQ queue
+    if(! $quiet) echo "submitting jobs..."
+    rm -f qsubs.log
+    foreach seed ( `seq 1 $seeds` )
+        echo -n "$seed " >> qsubs.log
+        qsub -e seed${seed}_errors.log -o seed${seed}.log -d $pwd ./refmac_cpu.com -F "$seed" >> qsubs.log
+    #    sleep 0.1
+    end
+    goto sum_maps
+endif
+
+# launch jobs on a SGE cluster, like the UCSF one
+if("$CLUSTER" == "SGE") then
+    # use a SGE queue
+    if(! $quiet) echo "submitting SGE jobs..."
+    qsub -cwd ./refmac_cpu.com 
+    #    sleep 0.1
+    goto sum_maps
+endif
 
 set jobs = 0
 set lastjobs = 0
@@ -156,26 +211,19 @@ goto sum_maps
 
 
 
-# launch jobs on a torq cluster, like pxproc
-launch_qsub:
-set pwd = `pwd`
-if(! $quiet) echo "submitting jobs..."
-foreach seed ( `seq 1 $seeds` )
-    qsub -e /dev/null -o ${tempfile}seed${seed}.log -d $pwd ./refmac_cpu.com -F "$seed" > /dev/null
-end
-goto sum_maps
-
 sum_maps:
+set seed = 1
 if(! $quiet) then
     echo "all jobs launched."
-    if (! -e ${fastmp}seed1done.txt) echo "waiting for 1 to finish..."
+    if (! -e ${fastmp}seed${seed}done.txt) echo "waiting for ${seed} to finish..."
 endif
-while (! -e ${fastmp}seed1done.txt)
-#   ls -l ${fastmp}seed1done.txt
+while (! -e ${fastmp}seed${seed}done.txt)
    sleep 1
+   ls -l ${fastmp}seed${seed}done.txt >& /dev/null
 end
 while (! -s ${fastmp}mask_seed${seed}.map)
    sleep 2
+   ls -l ${fastmp}mask_seed${seed}.map >& /dev/null
 end
 
 # now start adding up the maps...
@@ -185,11 +233,17 @@ foreach seed ( `seq 1 $seeds` )
     if(! $quiet) echo -n "$seed "
     while(! -e ${fastmp}seed${seed}done.txt)
         sleep 3
+        ls -l ${fastmp}seed${seed}done.txt >& /dev/null
+        wait
+    end
+    while(! -s ${fastmp}mask_seed${seed}.map)
+        sleep 5
+        ls -l ${fastmp}mask_seed${seed}.map >& /dev/null
         wait
     end
     if(! -e ${tempfile}sum.map) then
         cp -p ${fastmp}mask_seed${seed}.map ${tempfile}sum.map
-        if(! $?debug) rm -f ${fastmp}mask_seed${seed}.map ${fastmp}seed${seed}done.txt
+        if(! $debug) rm -f ${fastmp}mask_seed${seed}.map ${fastmp}seed${seed}done.txt
         continue
     endif
     echo maps add |\
@@ -200,7 +254,7 @@ foreach seed ( `seq 1 $seeds` )
         goto exit
     endif
     mv ${tempfile}new.map ${tempfile}sum.map
-    if(! $?debug) then
+    if(! $debug) then
         rm -f ${fastmp}mask_seed${seed}.map ${fastmp}seed${seed}done.txt
     endif
 end
@@ -210,6 +264,11 @@ wait
 
 # wait for queued jobs?
 
+if(! $debug) then
+    rm -f seed*.log >& /dev/null
+    rm -f qsubs.log >& /dev/null
+    rm -f refmac_cpu.com.* >& /dev/null
+endif
 
 # final check.  Did it work
 if(! -e ${tempfile}sum.map) then
@@ -303,7 +362,7 @@ if($?BAD) then
     exit 9
 endif
 
-if($?debug) exit
+if($debug) exit
 
 rm -f ${tempfile}* >& /dev/null
 
@@ -338,6 +397,13 @@ set mtzfile = ""
 set libfile = ""
 
 set quiet = 0
+set debug = 0
+
+# abort if we cant run
+if(! $?CCP4_SCR) then
+    set BAD = "CCP4 is not set up."
+    goto exit
+endif
 
 # pick temp filename location
 set logfile = /dev/null
@@ -401,10 +467,6 @@ foreach arg ( $* )
 end
 
 # bug out here if we cant run
-if(! $?CCP4_SCR) then
-    set BAD = "CCP4 is not set up."
-    goto exit
-endif
 if(! -e "$pdbfile") then
     echo "please specify an existing PDB file."
     goto Help
@@ -457,9 +519,63 @@ endif
 
 
 # system setup
-set CLUSTER = ""
+if(! $?CLUSTER) set CLUSTER = ""
 set pwd = `pwd`
 set uname = `uname`
+
+if("$CLUSTER" != "") goto cluster_detected
+
+# test for torq cluster
+cat << EOF >! test$$.csh
+#! /bin/tcsh -f
+#\$ -r n                            #-- if job crashes, do not restart
+#\$ -l mem_free=1M                  #-- submits on nodes with enough free memory (required)
+#\$ -l arch=linux-x64               #-- SGE resources (CPU type)
+#\$ -l netapp=1M,scratch=1M         #-- SGE resources (home and scratch disks)
+#\$ -l h_rt=00:00:01                #-- runtime limit
+touch \$1
+EOF
+chmod a+x test$$.csh
+
+# test for TORQ cluster
+set queued = 0
+qsub -e /dev/null -o /dev/null -d $pwd test$$.csh -F "testtorq$$.txt" >& /dev/null
+if(! $status) set queued = 1
+set timeout = 100
+while ( $queued && $timeout )
+    @ timeout = ( $timeout - 1 )
+    sleep 0.1
+    set queued = `qstat |& awk '$(NF-1)~/[RQ]/{print}' | wc -l`
+end
+if(-e ${pwd}/testtorq$$.txt) then
+    echo "detected torq-based cluster"
+    set CLUSTER = TORQ
+    goto cluster_detected
+endif
+
+# test for SGE
+qsub -cwd test$$.csh testsge$$.txt >&! ${tempfile}jid.txt
+if(! $status) set queued = 1
+set jid = `awk '{print $3}' ${tempfile}jid.txt | tail -n 1`
+if("$jid" != "") echo "testing SGE cluster, to skip set environment CLUSTER=SGE"
+set timeout = 300
+while ( ! -e ${pwd}/testsge$$.txt && $queued && $timeout )
+    @ timeout = ( $timeout - 1 )
+    set queued = `qstat -j $jid |& awk 'NF>1 && ! /jobs do not exist/' | wc -l`
+    sleep 1
+end
+if("$timeout" == "0" && ! -e ${pwd}/testsge$$.txt) echo "SGE cluster not working."
+if(-e ${pwd}/testsge$$.txt) then
+    echo "detected SGE-based cluster"
+    set CLUSTER = SGE
+    goto cluster_detected
+endif
+
+cluster_detected:
+rm -f test$$.csh* testtorq$$.txt testsge$$.txt >& /dev/null
+rm -f ${tempfile}jid.txt >& /dev/null
+
+
 
 if("$uname" == "Linux") then
     set CPUs = `awk '/^processor/' /proc/cpuinfo | wc -l`
@@ -506,30 +622,12 @@ if("$user_CPUs" == "cores") set user_CPUs = $cores
 if("$user_CPUs" == "free") set user_CPUs = $freeCPUs
 if("$user_CPUs" == "all") set user_CPUs = $CPUs
 if("$user_CPUs" != "auto") set CPUs = $user_CPUs
-echo "will use $CPUs CPUs"
+if("$CLUSTER" == "") echo "will use $CPUs CPUs"
 
-
-# test for torq cluster
-cat << EOF >! test$$.csh
-#! /bin/tcsh -f
-touch \$1
-EOF
-chmod a+x test$$.csh
-qsub -e /dev/null -o /dev/null -d $pwd test$$.csh -F "testtorq$$.txt" >& /dev/null
-set queued = 1
-while ( $queued )
-    sleep 0.1
-    set queued = `qstat |& awk '$(NF-1)~/[RQ]/{print}' | wc -l`
-end
-if(-e ${pwd}/testtorq$$.txt) then
-    echo "detected torq-based cluster"
-    set CLUSTER = TORQ
-endif
-rm -f test$$.csh testtorq$$.txt >& /dev/null
 
 
 # change things for debug mode
-if($?debug) then
+if($debug) then
     set tempfile = ./tempfile
     set logfile = fuzzymask_debug.log
 endif
@@ -579,6 +677,7 @@ BEGIN {
     if(! Bshift) Bshift = shift
     if(shift == "byB") Bshift = 0
     if(shift == "Lorentz") Bshift = 0
+    if(! drykick_scale) drykick_scale = 1
     pshift = shift
     shift_opt = shift
     if(pshift == "byB") pshift = "sqrt(B/8)/pi"
@@ -628,6 +727,11 @@ BEGIN {
     if(shift_opt=="byB" || shift_opt=="LorentzB"){
         # switch on "thermal" shift magnitudes
         shift=sqrt(Bfac/8)/pi*sqrt(3);
+
+        # kick them more if they are not water
+        if(Restyp != "HOH" && drykick_scale != 1){
+            shift *= drykick_scale;
+        }
 
         # randomly "skip" conformers with occ<1
         if(Occ+0<1){
