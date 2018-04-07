@@ -7,7 +7,7 @@
 #
 #   run with no arguments for online help
 #
-#   James Holton 3-18-18
+#   James Holton 3-30-18
 #
 #========================================================================
 #    Setting defaults :
@@ -16,12 +16,12 @@
 set ksol = 0.35824
 
 # solvent mask options
-set vdwprobe = 1.1
-set ionprobe = 0.6
-set rshrink = 0.2
+set vdwprobe = 1.3
+set ionprobe = 0.8
+set rshrink = 0.5
 
 # scale for size of kicks
-set drykick_scale = 1.0
+set drykick_scale = 0.8
 
 # number of refmac cycles to refine
 set ncyc_ideal = 5
@@ -48,6 +48,7 @@ cat << EOF
 usage: $0 refme.pdb refme.mtz [ligand.cif] \
      [ksol=${ksol}] \
      [vdwprobe=$vdwprobe] [ionprobe=$ionprobe] [rshrink=$rshrink] \
+     [drykick_scale=$drykick_scale] \
      [ncyc_ideal=${ncyc_ideal}] [ncyc_data=${ncyc_data}]\
      [seeds=${seeds}] [CPUs=auto] \
      [${mapout}] [output=${mtzout}]
@@ -61,6 +62,7 @@ ksol           electron density of bulk solvent far from any protein in electron
 vdwprobe       van der Walls radius for solvent probe in refmac 
 ionprobe       vdwprobe for ionic species in refmac 
 rshrink        mask shrinkage radius in refmac 
+drykick_scale  scale-up rms jiggle of non-water atoms, to compensate for minimization
 
 ncyc_ideal     number of geometry minimization refmac cycles to perform after jiggling (default: $ncyc_ideal)
 ncyc_data      number of refmac cycles vs x-ray data to perform before taking solvent mask (default: $ncyc_data)
@@ -81,6 +83,7 @@ after_Setup:
 cat << EOF
 generating $seeds random masks with:
 vdwprobe=$vdwprobe ionprobe=$ionprobe rshrink=$rshrink
+drykick_scale=$drykick_scale
 ncyc_ideal=${ncyc_ideal} ncyc_data=${ncyc_data}
 ksol=${ksol}
 mapout=${mapout} mtzout=${mtzout}
@@ -88,7 +91,9 @@ EOF
 
 set fastmp = ${tempfile}
 if("$CLUSTER" != "") then
+    # make sure we can access results
     set fastmp = "./"
+    if(-w "/scrapp/") set fastmp = "/scrapp/${USER}_`hostname`_$$"
 endif
 
 # create the refmac script we will run on each cpu
@@ -99,24 +104,32 @@ cat << EOF-script >! refmac_cpu.com
 #\$ -o $pwd                         #-- output directory 
 #\$ -e $pwd                         #-- error directory 
 #\$ -cwd                            #-- job should start in your working directory
-#\$ -r n                            #-- if job crashes, do not restart
+#\$ -r y                            #-- if a job crashes, restart
 #\$ -j y                            #-- tell the system that the STDERR and STDOUT should be joined
-#\$ -l mem_free=1G                  #-- submits on nodes with enough free memory (required)
+#\$ -l mem_free=16G                 #-- submits on nodes with enough free memory (required)
 #\$ -l arch=linux-x64               #-- SGE resources (CPU type)
-#\$ -l netapp=1G,scratch=1G         #-- SGE resources (home and scratch disks)
-#\$ -l h_rt=01:00:00                #-- runtime limit (see above; this requests 24 hours)
+#\$ -l netapp=16G,scratch=16G       #-- SGE resources (home and scratch disks)
+#\$ -l h_rt=00:10:00                #-- runtime limit (see above; this requests 24 hours)
 #\$ -t 1-$seeds                     #-- the number of tasks
 
 set seed = \$1
 
 if(\$?SGE_TASK_ID) then
+    qstat -j \$JOB_ID
     set seed = \$SGE_TASK_ID
 endif
 if(! \$?CCP4) then
     source ${CBIN}/ccp4.setup-csh
 endif
-set path = ( . \$path )
+set path = ( . `dirname $0` \$path )
 set tempfile = ${tempfile}\$\$
+
+hostname
+free -g
+echo "pid= \$\$"
+ps -fH
+df
+echo "seed = \$seed"
 
 # mess it up
 cat $pdbfile |\
@@ -149,6 +162,17 @@ ncyc $ncyc_data
 solvent vdwprobe $vdwprobe ionprobe $ionprobe rshrink $rshrink
 solvent yes
 EOF-refmac
+if(\$status) then
+    echo "what the fuck! "
+endif
+dmesg
+free
+if(\$?SGE_TASK_ID) then
+    qstat -j \$JOB_ID
+endif
+
+
+#cp \${tempfile}seed\${seed}minimized.pdb ${fastmp}seed\${seed}_minimized.pdb
 
 # clean up
 if(! $debug && -e ${fastmp}mask_seed\${seed}.map && "$CLUSTER" != "") then
@@ -160,6 +184,9 @@ endif
 
 # signal that map is ready
 touch ${fastmp}seed\${seed}done.txt
+
+# did we clean up after ourselves
+ls -l ${tempfile}*
 
 EOF-script
 chmod a+x refmac_cpu.com
@@ -230,17 +257,34 @@ end
 rm -f ${tempfile}sum.map
 if(! $quiet) echo -n "summing maps: "
 foreach seed ( `seq 1 $seeds` )
+    set timeleft = 100
     if(! $quiet) echo -n "$seed "
-    while(! -e ${fastmp}seed${seed}done.txt)
+    while(! -e ${fastmp}seed${seed}done.txt && $timeleft)
         sleep 3
+        @ timeleft = ( $timeleft - 1 )
         ls -l ${fastmp}seed${seed}done.txt >& /dev/null
         wait
     end
-    while(! -s ${fastmp}mask_seed${seed}.map)
+    set timeleft = 100
+    while(! -s ${fastmp}mask_seed${seed}.map && $timeleft)
+        echo "WARNING: map $seed should be here by now..."
         sleep 5
+        @ timeleft = ( $timeleft - 1 )
         ls -l ${fastmp}mask_seed${seed}.map >& /dev/null
         wait
     end
+    if(! $timeleft) then
+        echo ""
+        echo "trying to do $seed again..."
+        ./refmac_cpu.com $seed >$! ${tempfile}seed${seed}.log
+        if(-s ${fastmp}mask_seed${seed}.map) set timeleft = 1
+    endif
+    if(! $timeleft) then
+        cat ${tempfile}seed${seed}.log
+        cat refmac_cpu.com.*.${seed}
+        set BAD = "timed out waiting for jobs to finish."
+        goto exit
+    endif
     if(! -e ${tempfile}sum.map) then
         cp -p ${fastmp}mask_seed${seed}.map ${tempfile}sum.map
         if(! $debug) rm -f ${fastmp}mask_seed${seed}.map ${fastmp}seed${seed}done.txt
@@ -250,6 +294,7 @@ foreach seed ( `seq 1 $seeds` )
     mapmask mapin1 ${fastmp}mask_seed${seed}.map mapin2 ${tempfile}sum.map \
        mapout ${tempfile}new.map >> $logfile
     if(! -e ${tempfile}new.map) then
+        ls -l ${fastmp}mask_seed${seed}.map
         set BAD = "failed to make seed $seed "
         goto exit
     endif
@@ -261,6 +306,11 @@ end
 echo ""
 # wait for SMP jobs
 wait
+
+
+# examine RMS deviations?
+
+
 
 # wait for queued jobs?
 
@@ -323,7 +373,7 @@ endif
 echo "combining $mtzfile with Fpart PHIpart"
 echo "" |\
 mtzdump hklin $mtzfile |\
-awk 'NF>10' | awk '$(NF-1)~/^[FQIP]$/{++n;print $NF" "}' |\
+awk 'NF>10' | awk '$(NF-1)~/^[FDQIJPWGKLMAR]$/{++n;print $NF" "}' |\
 egrep -v "part" |\
 awk '{++n;print "E"n"="$1}' >! ${tempfile}tokens.txt
 set tokens = `cat ${tempfile}tokens.txt`
@@ -412,6 +462,9 @@ set tempfile = ${CCP4_SCR}/fuzzymask$$temp
 if(-w /dev/shm/ ) then
     set tempfile = /dev/shm/fuzzymask$$temp
 endif
+if(-w /scratch/ ) then
+    set tempfile = /scratch/${USER}fuzzymask$$temp
+endif
 
 # some platforms dont have these?
 if(! $?USER) then
@@ -460,6 +513,7 @@ foreach arg ( $* )
     if("$arg" =~ vdwprobe=*) set vdwprobe = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ ionprobe=*) set ionprobe = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ rshrink=*) set rshrink = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ drykick_scale=*) set drykick_scale = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ mtzout=*mtz) set mtzout = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ output=*mtz) set mtzout = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ mapout=*) set mapout = `echo $arg | awk -F "=" '{print $2}'`
@@ -556,7 +610,7 @@ endif
 # test for SGE
 qsub -cwd test$$.csh testsge$$.txt >&! ${tempfile}jid.txt
 if(! $status) set queued = 1
-set jid = `awk '{print $3}' ${tempfile}jid.txt | tail -n 1`
+set jid = `awk '$3+0>0{print $3}' ${tempfile}jid.txt | tail -n 1`
 if("$jid" != "") echo "testing SGE cluster, to skip set environment CLUSTER=SGE"
 set timeout = 300
 while ( ! -e ${pwd}/testsge$$.txt && $queued && $timeout )
@@ -638,7 +692,8 @@ endif
 # see if there is a user-provided parameter file
 set otheropts
 if(-e refmac_opts.txt) then
-    set otheropts = "@refmac_opts.txt"
+    awk '/^occupa/{next} {print}' refmac_opts.txt >! ${tempfile}refmac_opts.txt
+    set otheropts = "@${tempfile}refmac_opts.txt"
 endif
 set LIBSTUFF
 if(-e "$libfile") set LIBSTUFF = "LIBIN $libfile"
@@ -652,7 +707,7 @@ if(-e atomsf.lib) set LIBSTUFF = "$LIBSTUFF ATOMSF ./atomsf.lib"
 
 
 # requires jigglepdb.awk
-set path = ( $path `dirname $0` . )
+set path = ( `dirname $0` . $path )
 
 
 # deploy scripts?

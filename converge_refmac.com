@@ -111,7 +111,19 @@ awk '$(NF-1) == "F"{F=$NF; meanF=$8; reso=$(NF-2); comp=substr($0,32)+0; \
       if($(NF-1)=="Q"){S=$NF;if($8)meanS=$8};\
       meanF/=meanS;\
       print F, S, reso, comp, meanF;}' |\
+awk 'toupper($1) != "FC"' |\
 sort -k3n,4 -k4nr,5 -k5nr >! ${tempfile}F
+
+# use completeness, or I/sigI to pick default IP
+cat ${tempfile}mtzdmp |\
+awk '$(NF-1) == "J"{I=$NF; meanI=$8; reso=$(NF-2); comp=substr($0,32)+0; \
+      getline; \
+      S="none";meanS=1e6;\
+      if($(NF-1)=="Q"){S=$NF;if($8)meanS=$8};\
+      meanI/=meanS;\
+      print I, S, reso, comp, meanI;}' |\
+awk 'toupper($1) != "IC"' |\
+sort -k3n,4 -k4nr,5 -k5nr >! ${tempfile}I
 
 
 # and extract all dataset types/labels
@@ -120,13 +132,31 @@ awk 'NF>2{print $(NF-1), $NF, " "}' |\
 cat >! ${tempfile}cards
 
 # pick F with best resolution, or F/sigma
-set F    = `grep -v "part" ${tempfile}F | head -n 1`
+set F    = `awk '$1 !~ /part/ && $2 != "none"{print}' ${tempfile}F | head -n 1`
+if("$F" == "") then
+    set F    = `awk '$1 !~ /part/{print}' ${tempfile}F | head -n 1`
+endif
 set SIGF
 if($#F > 2) then
     set SIGF = $F[2]
     set F    = $F[1]
     if("$SIGF" == "none") set SIGF = ""
 endif
+
+# pick I with best resolution, or I/sigma
+set IP    = `awk '$1 !~ /part/ && $2 != "none"{print}' ${tempfile}I | head -n 1`
+if("$IP" == "") then
+    set IP    = `awk '$1 !~ /part/{print}' ${tempfile}I | head -n 1`
+endif
+set SIGIP
+if($#IP > 2) then
+    set SIGIP = $IP[2]
+    set IP    = $IP[1]
+    if("$SIGIP" == "none") set SIGIP = ""
+endif
+
+
+
 
 
 if("$F" == "") then
@@ -226,8 +256,13 @@ while ($moving && $trials_since_start < $max_trials || $last_time)
     if($#F > 1) set FP = "$F"
     set SIGFP
     if("$SIGF" != "") set SIGFP = "SIGFP=$SIGF"
+    if("$F" == "") set FP = ""
+    if("$FP" == "" && "$IP" != "") then
+        set FP = "IP=$IP"
+        set SIGFP = ""
+        if("$SIGIP" != "") set SIGFP = "SIGIP=$SIGIP"
+    endif
     set LABIN = "LABIN $FP $SIGFP $Fparts $FREE $HL"
-    if("$F" == "") set LABIN = ""
 
     set DAMP = "DAMP $damp $damp"
 
@@ -407,11 +442,11 @@ EOF-refmac
 
     cat last_refmac.pdb |\
     awk '/^ATOM|^HETAT/{++n;\
-       print n,substr($0,31,8),substr($0,39,8),substr($0,47,8),"|",substr($0,12,15)}' |\
+       print n,substr($0,31,8),substr($0,39,8),substr($0,47,8),"|",substr($0,12,16)}' |\
     cat >! ${tempfile}before.xyz
     cat refmacout.pdb |\
     awk '/^ATOM|^HETAT/{++n;\
-       print n,substr($0,31,8),substr($0,39,8),substr($0,47,8),"|",substr($0,12,15)}' |\
+       print n,substr($0,31,8),substr($0,39,8),substr($0,47,8),"|",substr($0,12,16)}' |\
     cat >! ${tempfile}after.xyz
     cat ${tempfile}before.xyz ${tempfile}after.xyz |\
     awk '{split($0,w,"|");key=w[2]} \
@@ -426,10 +461,10 @@ EOF-refmac
 
 
     cat last_refmac.pdb |\
-    awk '/^ATOM|^HETAT/{++n;print n,substr($0,55,6)+0,"|",substr($0,12,15)}' |\
+    awk '/^ATOM|^HETAT/{++n;print n,substr($0,55,6)+0,"|",substr($0,12,16)}' |\
     cat >! ${tempfile}before.o
     cat refmacout.pdb |\
-    awk '/^ATOM|^HETAT/{++n;print n,substr($0,55,6)+0,"|",substr($0,12,15)}' |\
+    awk '/^ATOM|^HETAT/{++n;print n,substr($0,55,6)+0,"|",substr($0,12,16)}' |\
     cat >! ${tempfile}after.o
     cat ${tempfile}before.o ${tempfile}after.o |\
     awk '{split($0,w,"|");key=w[2]} \
@@ -444,10 +479,10 @@ EOF-refmac
 
 
     cat last_refmac.pdb |\
-    awk '/^ATOM|^HETAT/{++n;print n,substr($0,61,6)+0,"|",substr($0,12,15)}' |\
+    awk '/^ATOM|^HETAT/{++n;print n,substr($0,61,6)+0,"|",substr($0,12,16)}' |\
     cat >! ${tempfile}before.B
     cat refmacout.pdb |\
-    awk '/^ATOM|^HETAT/{++n;print n,substr($0,61,6)+0,"|",substr($0,12,15)}' |\
+    awk '/^ATOM|^HETAT/{++n;print n,substr($0,61,6)+0,"|",substr($0,12,16)}' |\
     cat >! ${tempfile}after.B
     cat ${tempfile}before.B ${tempfile}after.B |\
     awk '{split($0,w,"|");key=w[2]} \
