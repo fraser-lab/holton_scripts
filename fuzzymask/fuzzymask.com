@@ -163,7 +163,7 @@ solvent vdwprobe $vdwprobe ionprobe $ionprobe rshrink $rshrink
 solvent yes
 EOF-refmac
 if(\$status) then
-    echo "what the fuck! "
+    echo "what the frak! "
 endif
 dmesg
 free
@@ -172,7 +172,7 @@ if(\$?SGE_TASK_ID) then
 endif
 
 
-#cp \${tempfile}seed\${seed}minimized.pdb ${fastmp}seed\${seed}_minimized.pdb
+#cp \${tempfile}seed\${seed}minimized.pdb ${pwd}/seed\${seed}_minimized.pdb
 
 # clean up
 if(! $debug && -e ${fastmp}mask_seed\${seed}.map && "$CLUSTER" != "") then
