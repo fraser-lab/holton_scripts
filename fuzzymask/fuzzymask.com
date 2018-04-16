@@ -26,6 +26,7 @@ set drykick_scale = 0.8
 # number of refmac cycles to refine
 set ncyc_ideal = 5
 set ncyc_data = 0
+set make_protein_map = 1
 
 # number of CPUs to use
 set seeds = 500
@@ -186,7 +187,7 @@ endif
 touch ${fastmp}seed\${seed}done.txt
 
 # did we clean up after ourselves
-ls -l ${tempfile}*
+#ls -l ${tempfile}*
 
 EOF-script
 chmod a+x refmac_cpu.com
@@ -315,6 +316,8 @@ wait
 # wait for queued jobs?
 
 if(! $debug) then
+    rm -f ${tempfile}seed*.log >& /dev/null
+    rm -f ${tempfile}seed*.pdb >& /dev/null
     rm -f seed*.log >& /dev/null
     rm -f qsubs.log >& /dev/null
     rm -f refmac_cpu.com.* >& /dev/null
@@ -509,7 +512,8 @@ foreach arg ( $* )
     if("$arg" =~ ksol=*) set ksol = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ CPUs=*) set user_CPUs = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ seeds=*) set seeds = `echo $arg | awk -F "=" '{print $2+0}'`
-    if("$arg" =~ ncyc=*) set ncyc = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ ncyc_ideal=*) set ncyc_ideal = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ ncyc_data=*) set ncyc_data = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ vdwprobe=*) set vdwprobe = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ ionprobe=*) set ionprobe = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ rshrink=*) set rshrink = `echo $arg | awk -F "=" '{print $2+0}'`
