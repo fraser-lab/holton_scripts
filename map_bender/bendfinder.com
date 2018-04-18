@@ -266,7 +266,7 @@ if(! -e "$pdb2") then
 endif
 
 # check if PDB files are ridiculously different
-set test = `rmsd $pdb1 $pdb2 | awk '/RMSD.CA/ && $3+0<3' | wc -l`
+set test = `rmsd $pdb1 $pdb2 | awk '/RMSD.CA/ && $3+0<10' | wc -l`
 if("$test" != "1") then
     set BAD = "pdb files too different.  Maybe run origins.com first."
     goto exit
@@ -747,17 +747,21 @@ OUTPUT PDB ORTH 1
 END
 EOF-conv
 
-
 # make sure it has the space group in the header
 echo "SPACE $SG" | pdbset xyzin ${tempfile}bent.pdb xyzout bent${order}_${id1}.pdb >> $logfile
 echo "transformed $id1 to match $id2 is bent${order}_${id1}.pdb"
 
-# since pdbset screws up hydrogen names, import these from the original
+# since pdbset and coordconv screw up names, transplant these from the original
+# keeping only XYZ and B from the bending results
 head -n 4 bent${order}_${id1}.pdb | egrep "^CRYST|^SCALE" >! ${tempfile}.pdb
-awk '/^ATOM|^HETAT/{print substr($0,1,30),"OLDNAME",++n}' $pdb1 |\
+cat $pdb1 |\
+awk '/^ATOM|^HETAT/{++n;\
+      print "REST",n,"|",substr($0,67);\
+      print substr($0,1,30),"OLDNAME",n}' |\
 cat bent${order}_${id1}.pdb - |\
-awk '/ OLDNAME /{print substr($0,1,30) rest[$NF];next}\
-   /^ATOM|^HETAT/{++n;rest[n]=substr($0,31)}' |\
+awk '/^REST/{rest[$2]=substr($0,index($0,"|")+2)}\
+    / OLDNAME /{n=$NF;print substr($0,1,30) xyzOB[n] rest[n];next}\
+   /^ATOM|^HETAT/{++n;xyzOB[n]=substr($0,31,3*8+2*6)}' |\
 cat >> ${tempfile}.pdb
 mv ${tempfile}.pdb bent${order}_${id1}.pdb
 
