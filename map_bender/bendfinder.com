@@ -30,7 +30,7 @@
 #        gnuplot version 5 to be in the PATH as "gnuplot" or "gnuplot5"
 #        ccp4 programs to be in the PATH : coordconv, pdbset, mapmask, mapdump
 #
-#        if refframe.map is provided :
+#        if bendme.map is provided :
 #           mapman from the RAVE suite from the Uppsala Software Factory
 ##############################################################################
 
