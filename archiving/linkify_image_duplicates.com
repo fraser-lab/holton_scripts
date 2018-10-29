@@ -11,7 +11,7 @@ endif
 if("$pretend" == "pretend") setenv PRETEND
 
 
-set CPUs = `grep proc /proc/cpuinfo | wc -l`
+set CPUs = `grep proc /proc/cpuinfo | wc -l | awk '{print $NF/2+1}'`
 
 
 if(! -x ./image_md5_extract.com) then

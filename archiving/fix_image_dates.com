@@ -14,15 +14,14 @@ if("$pretend" == "pretend") setenv PRETEND
 set CPUs = `grep proc /proc/cpuinfo | wc -l`
 
 #cd /local
-if(! -x ./image_md5_extract.com) then
+if(! -x ./headerdate.com) then
     cp ~jamesh/archiving/headerdate.com .
 endif
-if(! -x ./image_md5_extract.com) then
-    set BAD = "cannot find image_md5_extract.com"
+if(! -x ./headerdate.com) then
+    set BAD = "cannot find headerdate.com"
     goto exit
 endif
 
-set dir = alsenable/
 
 echo "finding all cbf and img files in $dir ..."
 find $dir \( -name '*.cbf' -o -name '*.img' \) -printf "%T@ %p\n" |\
@@ -45,6 +44,8 @@ endif
 
 
 update_header_dates:
+
+touch image_header_dates.txt
 
 # dont bother with things we know dont have dates
 #append_file_date.com image_header_dates.txt
@@ -128,11 +129,11 @@ awk -v dir=$dir '{split($1,w,".");\
       file=substr($0,index($0,dir));\
    print "puts \"[clock format "w[1]" -format \"%b %d %H:%M:%S."w[2]" %Z %Y\"] "file"\""}' |\
 tclsh |\
-awk '{file=substr($0,index($0,"alsenable"));\
+awk -v dir=$dir '{file=substr($0,index($0,dir));\
     print "touch    --date=\""$1,$2,$3,$4,$5"\"","\""file"\"";\
     print "touch -h --date=\""$1,$2,$3,$4,$5"\"","\""file"\""}' |\
 cat >! ${parthing}.txt
-wc -l ${parthing}.txt
+wc -l ${parthing}.txt | awk '{print $1/2,$2}'
 
 # see if there is any work to do
 set test = `cat ${parthing}.txt | wc -l`
