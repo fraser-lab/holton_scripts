@@ -72,6 +72,14 @@ wc -l image_md5sums.txt existing_image_md5sums.txt | grep -v total
 mv existing_image_md5sums.txt image_md5sums.txt
 
 
+# remove XDS-based CBF files from consideration
+cat image_files.txt |\
+awk '( /.cbf$/ || /.cbf.gz$/ ) && /\/FRAME|\/GAIN|\/ABS|\/ABSORP|\/BKGINIT|\/BKGPIX|\/BLANK|\/DECAY|\/MODPIX|-CORRECTIONS/{next}\
+    {print}' |\
+cat >! data_files.txt
+mv image_files.txt all_image_files.txt
+mv data_files.txt image_files.txt
+
 # find images with no sum in database
 echo "finding images that need md5 sums "
 set parthing = image_md5sums
@@ -149,9 +157,9 @@ awk '{file=$2;old=$1;\
          if(w[i]!=v[i])++p;\
          if(p && i<m)link="../"link;\
          if(p && w[i]!="")link=link"/"w[i];\
-#print w[i],v[i],link;\
+#print "DEBUG",w[i],v[i],link;\
        };\
-       gsub("/./","/",link);\
+       gsub("/\\./","/",link);\
        olddir=old;while(gsub("[^/]$","",olddir));\
        print "ls",old;\
        print "cd",olddir;\
@@ -221,7 +229,7 @@ find $dir -type l | tee links.txt | wc -l
 
 cat links.txt |\
 awk '{n=split($0,w,"/");file=w[n];dir=substr($0,1,length($0)-length(file));\
-   print "( cd",dir,"; ls",file,"; cd - ) > /dev/null"}' |\
+   print "( cd \""dir"\" ; ls \""file"\" ; cd - ) > /dev/null"}' |\
 cat >! ${parthing}.txt
 wc -l ${parthing}.txt
 
@@ -232,7 +240,7 @@ foreach cpu ( `seq 1 $CPUs` )
     awk -v cpu=$cpu -v CPUs=$CPUs 'int((NR-1)/4)%CPUs==(cpu-1)' >! ${parthing}_${cpu}.txt
 end
 foreach cpu ( `seq 1 $CPUs` )
-    cat ${parthing}_${cpu}.txt | tcsh -e >&! ${parthing}_${cpu}_errors.txt &
+    cat ${parthing}_${cpu}.txt | tcsh  >&! ${parthing}_${cpu}_errors.txt &
 end
 wait
 set errors = `cat ${parthing}_*_errors.txt | wc -l`
