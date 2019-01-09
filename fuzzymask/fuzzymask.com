@@ -7,7 +7,7 @@
 #
 #   run with no arguments for online help
 #
-#   James Holton 3-30-18
+#   James Holton 12-18-18
 #
 #========================================================================
 #    Setting defaults :
@@ -16,28 +16,46 @@
 set ksol = 0.35824
 
 # solvent mask options
-set vdwprobe = 1.3
+set vdwprobe = 1.4
 set ionprobe = 0.8
 set rshrink = 0.5
 
 # scale for size of kicks
-set drykick_scale = 0.8
+set kick_scale    = 1.0
+# applied to non-water afer above scale
+set drykick_scale = 1.0
+# number of sub-kicks to perform
+set kick_steps = 1
+# weight given to thru-bond partners in post-jiggle averaging
+set frac_thrubond = 0.9
+# number of times to do thru-bond averaging
+set ncyc_thrubond = 500
+# weight given to shift magnitude re-scaling in post-jiggle optimization
+set frac_magnforce = 1.1
+# number of times to do magnitude re-scaling in post-jiggle optimization
+set ncyc_magnforce = 500
 
-# number of refmac cycles to refine
+# number of refmac cycles to refine in each sub-kick step
 set ncyc_ideal = 5
 set ncyc_data = 0
-set make_protein_map = 1
 
 # number of CPUs to use
 set seeds = 500
 set user_CPUs  = auto
 
-# output map file
+# grid spacing to use for map, default is to let refmac choose
+set GRID = ""
+
+# output map files
 set mapout = "fuzzysolvent.map"
+set coordmap = "fuzzycoord.map"
+set carbonmap = "carbonized.map"
 
 # output mtz file
 set mtzout  = "Fparted.mtz"
 
+# output pdb file
+set multiconfpdb = "multiconf.pdb"
 
 if($#argv != 0) goto Setup
 # come back at after_Setup:
@@ -45,32 +63,41 @@ if($#argv != 0) goto Setup
 #========================================================================
 #    help message if run with no arguments
 Help:
-cat << EOF 
+cat << EOF
 usage: $0 refme.pdb refme.mtz [ligand.cif] \
      [ksol=${ksol}] \
      [vdwprobe=$vdwprobe] [ionprobe=$ionprobe] [rshrink=$rshrink] \
-     [drykick_scale=$drykick_scale] \
+     [drykick_scale=$drykick_scale] [kick_steps=$kick_steps]\
+     [frac_thrubond=${frac_thrubond}] [ncyc_thrubond=${ncyc_thrubond}]\
+     [frac_magnforce=${frac_magnforce}] [ncyc_magnforce=${ncyc_magnforce}]\
      [ncyc_ideal=${ncyc_ideal}] [ncyc_data=${ncyc_data}]\
      [seeds=${seeds}] [CPUs=auto] \
-     [${mapout}] [output=${mtzout}]
+     [mapout=${mapout}] [coordmap=${coordmap}]\
+     [output=${mtzout}]
 
 where:
 refme.pdb      PDB file being refined
 refme.mtz      data being used in refinement
 ligand.cif     is the geometry info for any ligands (must be one file)
 
-ksol           electron density of bulk solvent far from any protein in electrons/A^3
+ksol           electron density of bulk solvent far from any coordinate atoms in electrons/A^3
 vdwprobe       van der Walls radius for solvent probe in refmac 
 ionprobe       vdwprobe for ionic species in refmac 
 rshrink        mask shrinkage radius in refmac 
+kick_scale     scale-up rms jiggle, to compensate for minimization
 drykick_scale  scale-up rms jiggle of non-water atoms, to compensate for minimization
 
+frac_thrubond  weight of thru-bond positional averaging after random atomic jiggle (default: $frac_thrubond)
+ncyc_thrubond  number of thru-bond positional averaging cycles to perform after jiggling (default: $ncyc_thrubond)
+frac_magnforce scale for shift-magnitude re-normalization after thru-bond averaging cycle (default: $frac_magnforce)
+ncyc_magnforce number of shift magnitude re-scaling cycles to perform (default: $ncyc_magnforce)
 ncyc_ideal     number of geometry minimization refmac cycles to perform after jiggling (default: $ncyc_ideal)
 ncyc_data      number of refmac cycles vs x-ray data to perform before taking solvent mask (default: $ncyc_data)
 
 seeds          number of random maps to average (default: $seeds)
 CPUs           number of CPUs to use in parallel (default: $user_CPUs)
 $mapout map file of the fuzzy solvent to output in CCP4 format
+$coordmap map file of the average fuzzy coordinate atoms
 $mtzout    partial structure factors for solvent added to input mtz file
 
 EOF
@@ -84,18 +111,37 @@ after_Setup:
 cat << EOF
 generating $seeds random masks with:
 vdwprobe=$vdwprobe ionprobe=$ionprobe rshrink=$rshrink
+kick_scale=$kick_scale
 drykick_scale=$drykick_scale
+kick_steps=$kick_steps
+frac_thrubond=${frac_thrubond} ncyc_thrubond=${ncyc_thrubond}
+frac_magnforce=${frac_magnforce} ncyc_magnforce=${ncyc_magnforce}
 ncyc_ideal=${ncyc_ideal} ncyc_data=${ncyc_data}
 ksol=${ksol}
-mapout=${mapout} mtzout=${mtzout}
+mapout=${mapout} coordmap=${coordmap}
+mtzout=${mtzout}
 EOF
 
-set fastmp = ${tempfile}
+# make sure we have a temporary file location all cluster nodes and this node can see
+set sharedtmp = ${tempfile}
 if("$CLUSTER" != "") then
-    # make sure we can access results
-    set fastmp = "./"
-    if(-w "/scrapp/") set fastmp = "/scrapp/${USER}_`hostname`_$$"
+    # we are using a cluster make sure we can access results
+    set sharedtmp = "./"
+    if(-w "/scrapp/") mkdir -p /scrapp/${USER}/
+    if(-w "/scrapp2/") mkdir -p /scrapp2/${USER}/
+    if(-w "/scratch/") mkdir -p /scratch/${USER}/
+    if(-w "/global/scratch}/") mkdir -p /global/scratch/${USER}/
+    if(-w "/scrapp/${USER}/") set sharedtmp = "/scrapp/${USER}/fuzztemp_`hostname`_$$"
+    if(-w "/scrapp2/${USER}/") set sharedtmp = "/scrapp2/${USER}/fuzztemp_`hostname`_$$"
+    if(-w "/global/scratch/${USER}/") set sharedtmp = "/global/scratch/${USER}/fuzztemp_`hostname`_$$"
 endif
+
+set kick_step_list = `seq 1 $kick_steps`
+#set kick_scale_step = `echo $kick_scale $kick_steps | awk '{print sqrt($1*$1/$2)}'`
+#set drykick_scale_step = `echo $drykick_scale $kick_steps | awk '{print sqrt($1*$1/$2)}'`
+set kick_scale_step = `echo $kick_scale $kick_steps | awk '{print $1/$2}'`
+#set drykick_scale_step = `echo $drykick_scale $kick_steps | awk '{print $1/$2}'`
+set drykick_scale_step = $drykick_scale
 
 # create the refmac script we will run on each cpu
 cat << EOF-script >! refmac_cpu.com
@@ -112,6 +158,11 @@ cat << EOF-script >! refmac_cpu.com
 #\$ -l netapp=16G,scratch=16G       #-- SGE resources (home and scratch disks)
 #\$ -l h_rt=00:10:00                #-- runtime limit (see above; this requests 24 hours)
 #\$ -t 1-$seeds                     #-- the number of tasks
+# SLURM instructions
+#SBATCH 
+#SBATCH --array=1-$seeds
+#SBATCH 
+
 
 set seed = \$1
 
@@ -119,45 +170,70 @@ if(\$?SGE_TASK_ID) then
     qstat -j \$JOB_ID
     set seed = \$SGE_TASK_ID
 endif
+if(\$?SLURM_ARRAY_TASK_ID) then
+    set seed = \$SLURM_ARRAY_TASK_ID
+endif
+
 if(! \$?CCP4) then
     source ${CBIN}/ccp4.setup-csh
 endif
 set path = ( . `dirname $0` \$path )
 set tempfile = ${tempfile}\$\$
+mkdir -p `dirname $tempfile`
 
-hostname
-free -g
-echo "pid= \$\$"
-ps -fH
-df
+# prevent history substitution bombs
+history -c
+set savehist = ""
+set histlit
+
+if(\$?SGE_TASK_ID || \$?SLURM_ARRAY_TASK_ID) then
+    hostname
+    free -g
+    echo "pid= \$\$"
+    ps -fH
+    df
+endif
 echo "seed = \$seed"
 
+cp $pdbfile \${tempfile}seed\${seed}kickme.pdb
+foreach itr ( $kick_step_list )
+
 # mess it up
-cat $pdbfile |\
-jigglepdb.awk -v shift=byB -v seed=\$seed -v drykick_scale=$drykick_scale |\
-awk '! /^ATOM|^HETAT/ || substr(\$0,55)+0>0' >! \${tempfile}seed\${seed}.pdb
+cat \${tempfile}seed\${seed}kickme.pdb |\
+jigglepdb.awk -v shift=byB -v seed=\$seed \
+  -v frac_thrubond=$frac_thrubond -v ncyc_thrubond=$ncyc_thrubond \
+  -v frac_magnforce=$frac_magnforce -v ncyc_magnforce=$ncyc_magnforce \
+  -v shift_scale=$kick_scale_step \
+  -v dry_shift_scale=$drykick_scale_step |\
+awk '! /^ATOM|^HETAT/{print;next} \
+  substr(\$0,55)+0>0{print substr(\$0,1,16)" "substr(\$0,18)}' >! \${tempfile}seed\${seed}.pdb
 
 # clean it up
-refmac5 xyzin \${tempfile}seed\${seed}.pdb $LIBSTUFF \
-        xyzout \${tempfile}seed\${seed}minimized.pdb << EOF-refmac
-vdwrestraints 0
+if($ncyc_ideal != 0) then
+    refmac5 xyzin \${tempfile}seed\${seed}.pdb $LIBSTUFF \
+            xyzout \${tempfile}seed\${seed}minimized.pdb << EOF-refmac
+#vdwrestraints 0
 $otheropts
 refi type ideal
 ncyc $ncyc_ideal
 EOF-refmac
-
-# forget it if it didnt minimize
-if(! -e \${tempfile}seed\${seed}minimized.pdb) then
+else
     cp \${tempfile}seed\${seed}.pdb \${tempfile}seed\${seed}minimized.pdb
+endif
+
+# forget it all if it didnt minimize
+if(! -e \${tempfile}seed\${seed}minimized.pdb) then
+    echo "BAD" >! ${sharedtmp}seed\${seed}done.txt
+    exit 9
 endif
 
 # map it out
 refmac5 xyzin \${tempfile}seed\${seed}minimized.pdb \
         xyzout \${tempfile}seed\${seed}out.pdb \
         hklin $mtzfile  $LIBSTUFF \
-    mskout ${fastmp}mask_seed\${seed}.map \
+    mskout \${tempfile}mask_seed\${seed}out.map \
     hklout \${tempfile}seed\${seed}out.mtz << EOF-refmac
-vdwrestraints 0
+#vdwrestraints 0
 $otheropts
 ncyc $ncyc_data
 solvent vdwprobe $vdwprobe ionprobe $ionprobe rshrink $rshrink
@@ -166,25 +242,112 @@ EOF-refmac
 if(\$status) then
     echo "what the frak! "
 endif
-dmesg
-free
-if(\$?SGE_TASK_ID) then
-    qstat -j \$JOB_ID
+
+if(! -s \${tempfile}seed\${seed}out.pdb) then
+    echo "BAD" >! ${sharedtmp}seed\${seed}done.txt
+    exit 9
 endif
 
 
+# get ready for next round
+cp \${tempfile}seed\${seed}minimized.pdb \${tempfile}seed\${seed}kickme.pdb
+
+end
+
+
+if(\$?SGE_TASK_ID) then
+    dmesg
+    free
+    qstat -j \$JOB_ID
+endif
+
+# minimize map size to speed up summation
+mapmask mapin \${tempfile}mask_seed\${seed}out.map mapout ${sharedtmp}mask_seed\${seed}.map << EOF
+xyzlim asu
+EOF
+
+if("$GRID" != "") set GRID = ( $GRID )
+    set GRID = \`echo | mapdump mapin ${sharedtmp}mask_seed\${seed}.map | awk '/Grid sampling/{print \$(NF-2), \$(NF-1), \$NF; exit}'\`
+    echo "using map grid: \$GRID"
+endif
+
 #cp \${tempfile}seed\${seed}minimized.pdb ${pwd}/seed\${seed}_minimized.pdb
 
+if("$multiconfpdb" != "") then
+    cp \${tempfile}seed\${seed}out.pdb ${sharedtmp}seed\${seed}out.pdb
+endif
+
+if("$coordmap" != "") then
+
+if(0) then
+# calcualte coordinate map from refmac Fs
+fft hklin \${tempfile}seed\${seed}out.mtz \
+   mapout \${tempfile}seed\${seed}.map << EOF
+LABIN F1=FC PHI=PHIC
+GRID \$GRID
+EOF
+endif
+
+# covert coordinates to a map
+cat \${tempfile}seed\${seed}out.pdb |\
+awk '! /^ATOM|HETAT/{print;next} {l=\$0;Ee=substr(l,13,2);gsub(Ee," ","")}\
+      Ee !~ /^[CNOHS]\$/{Ee=toupper(substr(\$NF,1,2))} {\
+      printf("%s%2s%s\n",substr(l,1,12),Ee,substr(l,15,57))}' |\
+cat >! \${tempfile}seed\${seed}sfallme.pdb
+
+sfall xyzin \${tempfile}seed\${seed}sfallme.pdb \
+   mapout \${tempfile}seed\${seed}.map << EOF
+mode atmmap
+SYMM $SG
+cell $CELL
+GRID \$GRID
+SFSG 1
+EOF
+
+# minimize map size to speed up summation
+mapmask mapin \${tempfile}seed\${seed}.map \
+  mapout ${sharedtmp}coord_seed\${seed}.map << EOF
+xyzlim asu
+AXIS X Y Z
+EOF
+
+# carbonize the fuzzy coordiantes to check they converge to original model, if all non-hydrogen atoms were carbon
+cat \${tempfile}seed\${seed}out.pdb |\
+awk '! /^ATOM|HETAT/{print;next} \$NF!="H"{l=\$0\
+      printf("%s C%s 5.00           C\n",substr(l,1,12),substr(l,15,47),substr(l,1,61))}' |\
+cat >! \${tempfile}seed\${seed}carbonized.pdb
+
+sfall xyzin \${tempfile}seed\${seed}carbonized.pdb \
+   mapout \${tempfile}seed\${seed}.map << EOF
+mode atmmap
+SYMM $SG
+cell $CELL
+GRID \$GRID
+SFSG 1
+EOF
+# minimize map size to speed up summation
+mapmask mapin \${tempfile}seed\${seed}.map \
+  mapout ${sharedtmp}carbonized_seed\${seed}.map << EOF
+xyzlim asu
+AXIS X Y Z
+EOF
+
+endif
+
 # clean up
-if(! $debug && -e ${fastmp}mask_seed\${seed}.map && "$CLUSTER" != "") then
+if(! $debug && -e ${sharedtmp}mask_seed\${seed}.map && "$CLUSTER" != "") then
+    echo "CLEANING UP CLUSTER NODE "
     rm -f \${tempfile}seed\${seed}.pdb  >& /dev/null
+    rm -f \${tempfile}seed\${seed}.map  >& /dev/null
     rm -f \${tempfile}seed\${seed}minimized.pdb  >& /dev/null
+    rm -f \${tempfile}seed\${seed}carbonized.pdb  >& /dev/null
     rm -f \${tempfile}seed\${seed}out.pdb >& /dev/null
+    rm -f \${tempfile}seed\${seed}out.map >& /dev/null
     rm -f \${tempfile}seed\${seed}out.mtz  >& /dev/null
 endif
 
 # signal that map is ready
-touch ${fastmp}seed\${seed}done.txt
+touch ${sharedtmp}seed\${seed}done.txt
 
 # did we clean up after ourselves
 #ls -l ${tempfile}*
@@ -220,9 +383,9 @@ set jobs = 0
 set lastjobs = 0
 foreach seed ( `seq 1 $seeds` )
     if($quiet) then
-        ( ./refmac_cpu.com $seed >! ${tempfile}seed${seed}.log & ) >& /dev/null
+        ( ./refmac_cpu.com $seed >! ${sharedtmp}seed${seed}.log & ) >& /dev/null
     else
-        ./refmac_cpu.com $seed >! ${tempfile}seed${seed}.log &
+        ./refmac_cpu.com $seed >! ${sharedtmp}seed${seed}.log &
     endif
 
     # now make sure we dont overload the box
@@ -243,84 +406,166 @@ sum_maps:
 set seed = 1
 if(! $quiet) then
     echo "all jobs launched."
-    if (! -e ${fastmp}seed${seed}done.txt) echo "waiting for ${seed} to finish..."
+    if (! -e ${sharedtmp}seed${seed}done.txt) echo "waiting for ${seed} to finish..."
 endif
-while (! -e ${fastmp}seed${seed}done.txt)
+while (! -e ${sharedtmp}seed${seed}done.txt)
    sleep 1
-   ls -l ${fastmp}seed${seed}done.txt >& /dev/null
+   ls -l ${sharedtmp}seed${seed}done.txt >& /dev/null
 end
-while (! -s ${fastmp}mask_seed${seed}.map)
+while (! -s ${sharedtmp}mask_seed${seed}.map)
    sleep 2
-   ls -l ${fastmp}mask_seed${seed}.map >& /dev/null
+   ls -l ${sharedtmp}mask_seed${seed}.map >& /dev/null
 end
 
 # now start adding up the maps...
+echo -n "" >! ${tempfile}rmsds.log
 rm -f ${tempfile}sum.map
 if(! $quiet) echo -n "summing maps: "
 foreach seed ( `seq 1 $seeds` )
+
+    # big rigamarol to make sure files are not stuck in NFS
     set timeleft = 100
     if(! $quiet) echo -n "$seed "
-    while(! -e ${fastmp}seed${seed}done.txt && $timeleft)
+    while(! -e ${sharedtmp}seed${seed}done.txt && $timeleft)
         sleep 3
         @ timeleft = ( $timeleft - 1 )
-        ls -l ${fastmp}seed${seed}done.txt >& /dev/null
+        ls -l ${sharedtmp}seed${seed}done.txt >& /dev/null
         wait
     end
     set timeleft = 100
-    while(! -s ${fastmp}mask_seed${seed}.map && $timeleft)
+    while(! -s ${sharedtmp}mask_seed${seed}.map && $timeleft)
         echo "WARNING: map $seed should be here by now..."
         sleep 5
         @ timeleft = ( $timeleft - 1 )
-        ls -l ${fastmp}mask_seed${seed}.map >& /dev/null
+        ls -l ${sharedtmp}mask_seed${seed}.map >& /dev/null
         wait
     end
     if(! $timeleft) then
         echo ""
         echo "trying to do $seed again..."
-        ./refmac_cpu.com $seed >$! ${tempfile}seed${seed}.log
-        if(-s ${fastmp}mask_seed${seed}.map) set timeleft = 1
+        ./refmac_cpu.com $seed >$! ${sharedtmp}seed${seed}.log
+        if(-s ${sharedtmp}mask_seed${seed}.map) set timeleft = 1
     endif
     if(! $timeleft) then
-        cat ${tempfile}seed${seed}.log
+        cat ${sharedtmp}seed${seed}.log
         cat refmac_cpu.com.*.${seed}
         set BAD = "timed out waiting for jobs to finish."
         goto exit
     endif
+    # file exists and is readable
+
+
+    # now actually add the maps
     if(! -e ${tempfile}sum.map) then
-        cp -p ${fastmp}mask_seed${seed}.map ${tempfile}sum.map
-        if(! $debug) rm -f ${fastmp}mask_seed${seed}.map ${fastmp}seed${seed}done.txt
-        continue
+        cp -p ${sharedtmp}mask_seed${seed}.map ${tempfile}sum.map
+    else
+        echo maps add |\
+        mapmask mapin1 ${sharedtmp}mask_seed${seed}.map mapin2 ${tempfile}sum.map \
+           mapout ${tempfile}new.map >> $logfile
+        if(! -e ${tempfile}new.map) then
+            ls -l ${sharedtmp}mask_seed${seed}.map
+            set BAD = "failed to make seed $seed "
+            goto exit
+        endif
+        mv ${tempfile}new.map ${tempfile}sum.map
     endif
-    echo maps add |\
-    mapmask mapin1 ${fastmp}mask_seed${seed}.map mapin2 ${tempfile}sum.map \
-       mapout ${tempfile}new.map >> $logfile
-    if(! -e ${tempfile}new.map) then
-        ls -l ${fastmp}mask_seed${seed}.map
-        set BAD = "failed to make seed $seed "
-        goto exit
+
+    # settle on a map grid ASAP
+    if( "$GRID" == "" ) then
+        set GRID = `echo | mapdump mapin ${tempfile}sum.map | awk '/Grid sampling/{print $(NF-2), $(NF-1), $NF; exit}'`
+        if(! $quiet) echo "using map grid: $GRID"
     endif
-    mv ${tempfile}new.map ${tempfile}sum.map
+
+
+
+    # same for coordinate map
+    if( "$coordmap" != "" ) then
+        if(! -e ${tempfile}coordsum.map) then
+            cp -p ${sharedtmp}coord_seed${seed}.map ${tempfile}coordsum.map
+        else
+            echo maps add |\
+            mapmask mapin1 ${sharedtmp}coord_seed${seed}.map mapin2 ${tempfile}coordsum.map \
+               mapout ${tempfile}new.map >> $logfile        
+            mv ${tempfile}new.map ${tempfile}coordsum.map
+        endif
+    endif
+
+
+    # and carbonized map
+    if( "$carbonmap" != "" ) then
+        if(! -e ${tempfile}carbonsum.map) then
+            cp -p ${sharedtmp}carbonized_seed${seed}.map ${tempfile}carbonsum.map
+        else
+        echo maps add |\
+            mapmask mapin1 ${sharedtmp}carbonized_seed${seed}.map mapin2 ${tempfile}carbonsum.map \
+               mapout ${tempfile}new.map >> $logfile        
+           mv ${tempfile}new.map ${tempfile}carbonsum.map
+        endif
+    endif
+
+    # and now pdb files
+    if( "$multiconfpdb" != "" ) then
+        if(! -e ${tempfile}multiconf.pdb) then
+            egrep -v "^END" ${sharedtmp}seed${seed}out.pdb >! ${tempfile}multiconf.pdb
+        else
+            # just append atoms
+            egrep "^ATOM|^HETAT" ${sharedtmp}seed${seed}out.pdb >> ${tempfile}multiconf.pdb
+        endif
+    endif
+
+
+    # clean up
     if(! $debug) then
-        rm -f ${fastmp}mask_seed${seed}.map ${fastmp}seed${seed}done.txt
+        rm -f ${sharedtmp}mask_seed${seed}.map ${sharedtmp}seed${seed}done.txt
+        rm -f ${sharedtmp}coord_seed${seed}.map
+        rm -f ${sharedtmp}carbonized_seed${seed}.map
     endif
+    # sumarize rms geometry deviations
+    if("$CLUSTER" == "SGE") then
+        mv refmac_cpu.com.*.$seed ${sharedtmp}seed${seed}.log
+    endif
+    while (! -e ${sharedtmp}seed${seed}.log)
+        echo "waiting for $seed log"
+        sleep 1
+        if("$CLUSTER" == "SGE")  mv refmac_cpu.com.*.$seed ${sharedtmp}seed${seed}.log
+        find ${sharedtmp}seed${seed}.log
+    end
+
+    awk '/rmsBOND/,/Final/ && NF>1' ${sharedtmp}seed${seed}.log |\
+    awk 'NF>1 && ! /[a-z]/' |\
+    tail -n 1 >> ${tempfile}rmsds.log
 end
 echo ""
 # wait for SMP jobs
 wait
 
+if(1 || $debug) then
+    rmsd2B ${sharedtmp}*out.pdb | egrep "^ATOM|^HETAT" >! rmsd2B.pdb
+
+    awk '$NF!="H"' $pdbfile rmsd2B.pdb | rmsd -v debug=1 >! rmsds.txt
+endif
 
 # examine RMS deviations?
+echo -n "rms bonds, angles = "
+awk '{print $7,$9}' ${tempfile}rmsds.log |\
+awk '{sum1+=$1*$1;sum2+=$2*$2} \
+   END{print sqrt(sum1/NR),sqrt(sum2/NR)}'
 
-
+cp -p ${tempfile}rmsds.log rmsds.log
 
 # wait for queued jobs?
 
 if(! $debug) then
-    rm -f ${tempfile}seed*.log >& /dev/null
-    rm -f ${tempfile}seed*.pdb >& /dev/null
+    rm -f ${tempfile}*seed*.log >& /dev/null
+    rm -f ${tempfile}*seed*.pdb >& /dev/null
     rm -f seed*.log >& /dev/null
     rm -f qsubs.log >& /dev/null
     rm -f refmac_cpu.com.* >& /dev/null
+endif
+
+# save as readable name
+if("$multiconfpdb" != "") then
+    mv ${tempfile}multiconf.pdb $multiconfpdb
 endif
 
 # final check.  Did it work
@@ -331,6 +576,7 @@ endif
 
 # put on the appropriate scale, and expand to cell
 set max = `echo | mapdump mapin ${tempfile}sum.map | awk '/Maximum density/{print $NF}'`
+#set max = $seeds
 set scale = `echo $ksol $max | awk '$2+0==0{print $1;exit} {print $1/$2}'`
 
 set axis = "Z X Y"
@@ -343,11 +589,210 @@ xyzlim cell
 AXIS $axis
 EOF
 if("$mapout" != "") then
-    cp ${tempfile}ksol.map $mapout
-    echo | mapdump mapin $mapout | grep density
-    echo "solvent map: $mapout"
+    mapmask mapin ${tempfile}ksol.map mapout $mapout << EOF >> $logfile
+    xyzlim asu
+    AXIS X Y Z
+EOF
+    echo -n "fuzzy solvent map: "
+    echo | mapdump mapin $mapout | awk '/density/{gsub("imum","");printf("%s %s ",$1,$NF)}'
+    echo "$mapout"
 endif
 
+
+if( "$coordmap" == "" ) goto skipcoordmap
+
+# put on the appropriate scale, and expand to cell
+set scale = `echo $seeds | awk '{print 1/$1}'`
+
+# reorganize map for SFALL
+mapmask mapin ${tempfile}coordsum.map mapout ${tempfile}coordavg.map << EOF >> $logfile
+scale factor $scale 0
+xyzlim cell
+AXIS $axis
+EOF
+mapmask mapin ${tempfile}coordavg.map mapout $coordmap << EOF >> $logfile
+xyzlim asu
+axis X Y Z
+EOF
+echo -n "fuzzy coord   map: " 
+echo | mapdump mapin $coordmap | awk '/density/{gsub("imum","");printf("%s %s ",$1,$NF)}'
+echo "$coordmap"
+
+
+# do the same for the original coord
+cat $pdbfile |\
+awk '! /^ATOM|HETAT/{print;next} {Ee=substr($0,13,2);gsub(Ee," ","")}\
+      Ee !~ /^[CNOHS]$/{Ee=toupper(substr($NF,1,2))} {l=$0;\
+      printf("%s%2s%s\n",substr(l,1,12),Ee,substr(l,15,57))}' |\
+cat >! ${tempfile}sfallme.pdb
+sfall xyzin ${tempfile}sfallme.pdb mapout ${tempfile}sfalled.map << EOF >> $logfile
+mode atmmap
+SYMM $SG
+cell $CELL
+GRID $GRID
+SFSG 1
+EOF
+mapmask mapin ${tempfile}sfalled.map mapout ${tempfile}orig_coord.map << EOF >> $logfile
+xyzlim cell
+AXIS $axis
+EOF
+cp ${tempfile}orig_coord.map orig_coord.map
+
+
+echo scale factor -1 |\
+mapmask mapin ${tempfile}orig_coord.map mapout ${tempfile}neg.map >> $logfile
+echo maps add |\
+mapmask mapin1 ${tempfile}coordavg.map mapin2 ${tempfile}neg.map mapout coord_diff.map >> $logfile
+echo -n "fz-orig coord map: "
+echo | mapdump mapin coord_diff.map | awk '/density/{gsub("imum","");printf("%s %s ",$1,$NF)}'
+echo "coord_diff.map"
+
+
+# compare fuzzy coordinate map to original model
+echo correlate section |\
+overlapmap mapin1 ${tempfile}orig_coord.map \
+           mapin2 ${tempfile}coordavg.map |\
+awk '/Total corr/{print "CC between original and fuzzy coordinate maps:", $NF}'
+
+
+# compare fuzzy coordinate map to original model as structure factors
+sfall mapin ${tempfile}orig_coord.map hklout ${tempfile}orig_coord.mtz << EOF >> $logfile
+mode sfcalc mapin
+SFSG 1
+resolution $reso
+EOF
+sfall mapin ${tempfile}coordavg.map hklout ${tempfile}fuzzed.mtz << EOF >> $logfile
+mode sfcalc mapin
+SFSG 1
+resolution $reso
+EOF
+rm -f ${tempfile}cadded.mtz
+sftools << EOF >> $logfile
+read ${tempfile}orig_coord.mtz col FC
+read ${tempfile}fuzzed.mtz col FC
+set labels
+Forig
+Ffuzz
+calc Q col SIGF = 0.1
+write ${tempfile}cadded.mtz
+quit
+y
+EOF
+scaleit hklin ${tempfile}cadded.mtz hklout ${tempfile}scaled.mtz << EOF | tee ${tempfile}scaleit.log >> $logfile
+labin FP=Forig SIGFP=SIGF FPH1=Ffuzz SIGFPH1=SIGF
+EOF
+awk '/THE TOTALS/{print "fuzz vs orig coord-maps R factor:", substr($0,50,6)}' ${tempfile}scaleit.log
+set scale = `awk '$1=="Derivative" && ! /itle/{print $3}' ${tempfile}scaleit.log | tail -1`
+set B     = `awk '/equivalent iso/{print $NF}' ${tempfile}scaleit.log | tail -1`
+echo "scale= $scale B= $B"
+
+skipcoordmap:
+
+
+
+
+if( "$carbonmap" == "" ) goto skipcarbonmap
+
+# put on the appropriate scale, and expand to cell
+set scale = `echo $seeds | awk '{print 1/$1}'`
+
+# reorganize map for SFALL
+mapmask mapin ${tempfile}carbonsum.map mapout ${tempfile}carbonavg.map << EOF >> $logfile
+scale factor $scale 0
+xyzlim cell
+AXIS $axis
+EOF
+mapmask mapin ${tempfile}carbonavg.map mapout $carbonmap << EOF >> $logfile
+xyzlim asu
+axis X Y Z
+EOF
+echo -n "fuzzy carbon  map: " 
+echo | mapdump mapin $carbonmap | awk '/density/{gsub("imum","");printf("%s %s ",$1,$NF)}'
+echo "$carbonmap"
+
+
+# carbonize the original coord
+cat $pdbfile |\
+awk '! /^ATOM|HETAT/{print;next} $NF!="H"{l=$0\
+      printf("%s C%s 5.00           C\n",substr(l,1,12),substr(l,15,47),substr(l,1,61))}' |\
+cat >! ${tempfile}carbonized.pdb
+sfall xyzin ${tempfile}carbonized.pdb mapout ${tempfile}sfalled.map << EOF >> $logfile
+mode atmmap
+SYMM $SG
+cell $CELL
+GRID $GRID
+SFSG 1
+EOF
+mapmask mapin ${tempfile}sfalled.map mapout ${tempfile}orig_carbon.map << EOF >> $logfile
+xyzlim cell
+AXIS $axis
+EOF
+cp ${tempfile}orig_carbon.map orig_carbon.map
+
+
+echo scale factor -1 |\
+mapmask mapin ${tempfile}orig_carbon.map mapout ${tempfile}neg.map >> $logfile
+echo maps add |\
+mapmask mapin1 ${tempfile}carbonavg.map mapin2 ${tempfile}neg.map mapout carbon_diff.map >> $logfile
+echo -n "fz-orig carbon map: "
+echo | mapdump mapin carbon_diff.map | awk '/density/{gsub("imum","");printf("%s %s ",$1,$NF)}'
+echo "carbon_diff.map"
+
+
+# compare fuzzy carbonized map to original model
+echo correlate section |\
+overlapmap mapin1 ${tempfile}orig_carbon.map \
+           mapin2 ${tempfile}carbonavg.map |\
+awk '/Total corr/{print "CC between original and fuzzy carbonized coordinate maps:", $NF}'
+
+
+# compare fuzzy coordinate map to original model as structure factors
+sfall mapin ${tempfile}orig_carbon.map hklout ${tempfile}orig_carbon.mtz << EOF >> $logfile
+mode sfcalc mapin
+SFSG 1
+resolution $reso
+EOF
+sfall mapin ${tempfile}carbonavg.map hklout ${tempfile}fuzzed.mtz << EOF >> $logfile
+mode sfcalc mapin
+SFSG 1
+resolution $reso
+EOF
+rm -f ${tempfile}cadded.mtz
+sftools << EOF >> $logfile
+read ${tempfile}orig_carbon.mtz col FC
+read ${tempfile}fuzzed.mtz col FC
+set labels
+Forig
+Ffuzz
+calc Q col SIGF = 0.1
+write ${tempfile}cadded.mtz
+quit
+y
+EOF
+scaleit hklin ${tempfile}cadded.mtz hklout ${tempfile}scaled.mtz << EOF | tee ${tempfile}scaleit.log >> $logfile
+labin FP=Forig SIGFP=SIGF FPH1=Ffuzz SIGFPH1=SIGF
+EOF
+awk '/THE TOTALS/{print "fuzz vs orig carbonized-maps R factor:", substr($0,50,6)}' ${tempfile}scaleit.log
+set scale = `awk '$1=="Derivative" && ! /itle/{print $3}' ${tempfile}scaleit.log | tail -1`
+set B     = `awk '/equivalent iso/{print $NF}' ${tempfile}scaleit.log | tail -1`
+echo "scale= $scale B= $B"
+
+skipcarbonmap:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+sfall:
 # first one will crash?
 echo "sfall..."
 sfall mapin ${tempfile}ksol.map hklout ${tempfile}sfalled.mtz << EOF | tee -a ${tempfile}crash.log >> $logfile
@@ -400,9 +845,20 @@ else
 endif
 
 
+
+
+# compare to F in mtz file?
+
+
+
+
+
+
+final_message:
 cat << EOF
+
 add this to refmac input:
-LABIN  FPART1=Fpart PHIPART1=PHIpart
+LABIN FP=FP SIGFP=SIGFP FREE=FreeR_flag  FPART1=Fpart PHIP1=PHIpart
 SCPART 1
 SOLVENT NO
 EOF
@@ -463,10 +919,12 @@ set logfile = /dev/null
 mkdir -p ${CCP4_SCR} >&! /dev/null
 set tempfile = ${CCP4_SCR}/fuzzymask$$temp
 if(-w /dev/shm/ ) then
-    set tempfile = /dev/shm/fuzzymask$$temp
+    mkdir -p /dev/shm/${USER}
+    set tempfile = /dev/shm/${USER}/fuzzymask$$temp
 endif
 if(-w /scratch/ ) then
     set tempfile = /scratch/${USER}fuzzymask$$temp
+    mkdir -p /scratch/${USER}
 endif
 
 # some platforms dont have these?
@@ -511,16 +969,24 @@ foreach arg ( $* )
     endif
     if("$arg" =~ ksol=*) set ksol = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ CPUs=*) set user_CPUs = `echo $arg | awk -F "=" '{print $2}'`
+    if("$arg" =~ CLUSTER=*) set CLUSTER = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ seeds=*) set seeds = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ frac_thrubond=*) set frac_thrubond = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ ncyc_thrubond=*) set ncyc_thrubond = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ frac_magnforce=*) set frac_magnforce = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ ncyc_magnforce=*) set ncyc_magnforce = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ ncyc_ideal=*) set ncyc_ideal = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ ncyc_data=*) set ncyc_data = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ vdwprobe=*) set vdwprobe = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ ionprobe=*) set ionprobe = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ rshrink=*) set rshrink = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ kick_steps=*) set kick_steps = `echo $arg | awk -F "=" '{print $2+0}'`
+    if("$arg" =~ kick_scale=*) set kick_scale = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ drykick_scale=*) set drykick_scale = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ mtzout=*mtz) set mtzout = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ output=*mtz) set mtzout = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ mapout=*) set mapout = `echo $arg | awk -F "=" '{print $2}'`
+    if("$arg" =~ coordmap=*) set coordmap = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ pdbfile=*) set pdbfile = `echo $arg | awk -F "=" '{print $2}'`
 end
 
@@ -534,10 +1000,14 @@ if(! -e "$mtzfile") then
     goto Help
 endif
 
+if("$coordmap" !~ *.map && "$coordmap" !~ *.ccp4) then
+    set coordmap = ""
+endif
 
 # examine the MTZ file
 echo | mtzdump hklin $mtzfile >&! ${tempfile}mtzdump.txt
 set reso = `awk '/Resolution Range/{getline;getline;print $6}' ${tempfile}mtzdump.txt`
+rm -f ${tempfile}mtzdump.txt
 if("$reso" == "") then
     echo "cannot read $mtzfile as mtz"
     goto Help
@@ -581,7 +1051,7 @@ if(! $?CLUSTER) set CLUSTER = ""
 set pwd = `pwd`
 set uname = `uname`
 
-if("$CLUSTER" != "") goto cluster_detected
+if("$CLUSTER" != "" && "$CLUSTER" != "none") goto cluster_detected
 
 # test for torq cluster
 cat << EOF >! test$$.csh
@@ -680,6 +1150,7 @@ if("$user_CPUs" == "cores") set user_CPUs = $cores
 if("$user_CPUs" == "free") set user_CPUs = $freeCPUs
 if("$user_CPUs" == "all") set user_CPUs = $CPUs
 if("$user_CPUs" != "auto") set CPUs = $user_CPUs
+if("$CLUSTER" == "none") set CLUSTER = ""
 if("$CLUSTER" == "") echo "will use $CPUs CPUs"
 
 
@@ -736,7 +1207,8 @@ BEGIN {
     if(! Bshift) Bshift = shift
     if(shift == "byB") Bshift = 0
     if(shift == "Lorentz") Bshift = 0
-    if(! drykick_scale) drykick_scale = 1
+    if(! shift_scale) shift_scale = 1
+    if(! dry_shift_scale) dry_shift_scale = 1
     pshift = shift
     shift_opt = shift
     if(pshift == "byB") pshift = "sqrt(B/8)/pi"
@@ -744,6 +1216,10 @@ BEGIN {
     if(seed) srand(seed+0)
     if(! keepocc) keepocc=0
     if(! distribution) distribution="gaussian";
+    if(! frac_thrubond) frac_thrubond=0.5
+    if(! ncyc_thrubond) ncyc_thrubond=0
+    if(! frac_magnforce) frac_magnforce=5.0
+    if(! ncyc_magnforce) ncyc_magnforce=ncyc_thrubond/2
 
     pi=4*atan2(1,1);
 
@@ -751,136 +1227,291 @@ BEGIN {
     global_confsel=rand();
 
     print "REMARK jiggled by dXYZ=", pshift, "dB=", Bshift
+    print "REMARK shift_scale=",shift_scale,"dry_shift_scale=",dry_shift_scale
+    print "REMARK frac_thrubond=",frac_thrubond,"ncyc_thrubond=",ncyc_thrubond
+    print "REMARK frac_magnforce=",frac_magnforce,"ncyc_magnforce=",ncyc_magnforce
     print "REMARK random number seed: " seed+0
 }
 
-/^ATOM/ || /^HETATM/ {
+# count all lines
+{++n;line[n]=\$0}
 
+/^ATOM|^HETAT/{
     if(debug) print tolower(\$0)
 
 #######################################################################################
-    electrons = substr(\$0, 67,6)
-    XPLORSegid = substr(\$0, 73, 4)            # XPLOR-style segment ID
-    split(XPLORSegid, a)
-    XPLORSegid = a[1];
+#    electrons = substr(\$0, 67,6)
+#    XPLORSegid = substr(\$0, 73, 4)            # XPLOR-style segment ID
+#    split(XPLORSegid, a)
+#    XPLORSegid = a[1];
     Element = substr(\$0, 67)
 
-    Atomnum= substr(\$0,  7, 5)+0
-    Element= substr(\$0, 13, 2);
+#    Atomnum= substr(\$0,  7, 5)+0
+    if(Element !~ /^[A-Z]/) Element= substr(\$0, 13, 2);
     Greek= substr(\$0, 15, 2);
     split(Element Greek, a)
-    Atom   = a[1];
-    Conf   = substr(\$0, 17, 1)                # conformer letter
-    Restyp = substr(\$0, 18, 3)
-    Segid  = substr(\$0, 22, 1)            # O/Brookhaven-style segment ID
-    Resnum = substr(\$0, 23, 4)+0
-    X      = substr(\$0, 31, 8)+0
-    Y      = substr(\$0, 39, 8)+0
-    Z      = substr(\$0, 47, 8)+0
-    Occ    = substr(\$0, 55, 6)+0
-    Bfac   = substr(\$0, 61, 6)+0
-#   rest   = substr(\$0, 67)
-    ATOM   = toupper(substr(\$0, 1, 6))
+    Atomtype[n]   = a[1];
+    if(length(a[1])==4 && Element ~ /^H/)Element="H";
+    gsub(" ","",Element);
+    Ee[n] = Element;
+    #main[n]=(Atom[n] ~ /^[NCO]\$/ || Atom[n] ~ /^C[AB]\$/);
+    prefix[n] = substr(\$0,  1,30)
+    Conf[n]   = substr(\$0, 17, 1)                # conformer letter
+    Restyp[n] = substr(\$0, 18, 3)
+    Segid[n]  = substr(\$0, 22, 1)            # O/Brookhaven-style segment ID
+    Resnum[n] = substr(\$0, 23, 4)+0
+    X[n]      = substr(\$0, 31, 8)+0
+    Y[n]      = substr(\$0, 39, 8)+0
+    Z[n]      = substr(\$0, 47, 8)+0
+    Occ[n]    = substr(\$0, 55, 6)+0
+    Bfac[n]   = substr(\$0, 61, 6)+0
+    rest[n]   = substr(\$0, 67)
+#    ATOM   = toupper(substr(\$0, 1, 6))
 #######################################################################################
+}
+
+END{
+
+  # min/max bond lengths
+  if(min_bond_d == "") min_bond_d = 1
+  if(max_bond_d == "") max_bond_d = 2
+
+
+  for(i=1;i<=n;++i)
+  {
+    if(prefix[i] !~ /^ATOM|^HETAT/ ) continue;
 
     if(shift_opt=="byB" || shift_opt=="LorentzB"){
         # switch on "thermal" shift magnitudes
-        shift=sqrt(Bfac/8)/pi*sqrt(3);
+        shift=sqrt(Bfac[i]/8)/pi*sqrt(3);
+
+        # kick them more than byB?
+        if(shift_scale != 1){
+            shift *= shift_scale;
+        }
 
         # kick them more if they are not water
-        if(Restyp != "HOH" && drykick_scale != 1){
-            shift *= drykick_scale;
+        if(Restyp[i] != "HOH" && dry_shift_scale != 1){
+            shift *= dry_shift_scale;
         }
 
         # randomly "skip" conformers with occ<1
-        if(Occ+0<1){
+        if(Occ[i]+0<1){
             # remember all occupancies
-            if(conf_hi[Conf,Segid,Resnum]==""){
-                conf_lo[Conf,Segid,Resnum]=cum_occ[Segid,Resnum]+0;
-                cum_occ[Segid,Resnum]+=Occ;
-                conf_hi[Conf,Segid,Resnum]=cum_occ[Segid,Resnum];
+            if(conf_hi[Conf[i],Segid[i],Resnum[i]]==""){
+                conf_lo[Conf[i],Segid[i],Resnum[i]]=cum_occ[Segid[i],Resnum[i]]+0;
+                cum_occ[Segid[i],Resnum[i]]+=Occ[i];
+                conf_hi[Conf[i],Segid[i],Resnum[i]]=cum_occ[Segid[i],Resnum[i]];
             }
         }
     }
-    # pick a random direction
-#    norm = 0;
-#    while(! norm)
-#    {
-#        dX = rand()-0.5;
-#        dY = rand()-0.5;
-#        dZ = rand()-0.5;
-#        # calculate its length
-#        norm = sqrt(dX*dX + dY*dY + dZ*dZ);
-#    }
-#    
-#    # pick a (gaussian) random distance to move
-#    dR = gaussrand(shift)
-    
-    # move the atom
-#    X += dR * dX / norm;
-#    Y += dR * dY / norm;
-#    Z += dR * dZ / norm;
     if(shift_opt == "LorentzB")
     {
         distribution = "Lorentz"
     }
     if(distribution == "Lorentz")
     {
-        dX = lorentzrand(shift/sqrt(3));
-        dY = lorentzrand(shift/sqrt(3));
-        dZ = lorentzrand(shift/sqrt(3));
+        dx = lorentzrand(shift/sqrt(3));
+        dy = lorentzrand(shift/sqrt(3));
+        dz = lorentzrand(shift/sqrt(3));
     }
+    
     if(distribution == "gaussian" || distribution == "Gauss")
     {
-        dX = gaussrand(shift/sqrt(3));
-        dY = gaussrand(shift/sqrt(3));
-        dZ = gaussrand(shift/sqrt(3));
+        dx = gaussrand(shift/sqrt(3));
+        dy = gaussrand(shift/sqrt(3));
+        dz = gaussrand(shift/sqrt(3));
     }
     if(distribution == "uniform")
     {
         dR=2
         while(dR>1)
         {
-            dX = (2*rand()-1);
-            dY = (2*rand()-1);
-            dZ = (2*rand()-1);
-            dR = sqrt(dX^2+dY^2+dZ^2);
+            dx = (2*rand()-1);
+            dy = (2*rand()-1);
+            dz = (2*rand()-1);
+            dR = sqrt(dx^2+dy^2+dz^2);
         }
-        dX *= shift;
-        dY *= shift;
-        dZ *= shift;
+        dx *= shift;
+        dy *= shift;
+        dz *= shift;
     }
 
-    X += dX;
-    Y += dY;
-    Z += dZ;
+    dX[i] = dx;
+    dY[i] = dy;
+    dZ[i] = dz;
 
     # pick a random shift on B-factor
-    if(Bshift+0>0) Bfac += gaussrand(Bshift)
-    if(Oshift+0>0) Occ += gaussrand(Oshift)
+    if(Bshift+0>0) Bfac[i] += gaussrand(Bshift)
+    if(Oshift+0>0) Occ[i] += gaussrand(Oshift)
     
     # use same occopancy for given conformer
-    if(! keepocc && conf_hi[Conf,Segid,Resnum]!=""){
+    if(! keepocc && conf_hi[Conf[i],Segid[i],Resnum[i]]!=""){
         # use same random number for all conformer choices
         confsel = global_confsel;
         # unless occupancies do not add up
-        if(Conf==" "){
+        if(Conf[i]==" "){
             # save this for later?
             confsel = rand();
         }
-        Occ = 0;
+        Occ[i] = 0;
         # atom only exists if it falls in the chosen interval
-        lo=conf_lo[Conf,Segid,Resnum];
-        hi=conf_hi[Conf,Segid,Resnum];
-        if(lo < confsel && confsel <= hi) Occ=1;
+        lo=conf_lo[Conf[i],Segid[i],Resnum[i]];
+        hi=conf_hi[Conf[i],Segid[i],Resnum[i]];
+        if(lo < confsel && confsel <= hi) Occ[i]=1;
+    }
+  }
+
+
+    if(frac_thrubond != 0 && ncyc_thrubond != 0)
+    {
+        print "REMARK measuring original bond lengths"
+        # now, find all the bonds in the unperturbed structure that don't involve zero-occupancy members
+        for(i=1;i<=n;++i){
+            #skip zero occupancy
+            if( Occ[i]==0 ) continue;
+            for(j=1;j<i;++j){
+                # skip zero occupancy
+                if( Occ[j]==0 ) continue;
+                # skip nonsencial conformer relationships?
+#                if( Conf[j] != Conf[i] && ! ( Conf[i] == " " || Conf[j] == " " || main[j] && main[i]) ) continue;
+                mind=min_bond_d;maxd=max_bond_d;
+                # hydrogen bonding lengths are shorter
+                if( Ee[i] == "H" || Ee[j] == "H" ){
+                    mind=0.5;maxd=1.5;
+                    if(Ee[i]==Ee[j])maxd=0;
+                };
+                # recognize disulfides
+                if( Ee[i]=="S" && Ee[j] == "S" && Restyp[i]=="CYS" && Restyp[j]=="CYS"){mind=1.5;maxd=2.5};
+                # measure distance
+                if(X[i]>X[j]+maxd || X[i]<X[j]-maxd) continue;
+                if(Y[i]>Y[j]+maxd || Y[i]<Y[j]-maxd) continue;
+                if(Z[i]>Z[j]+maxd || Z[i]<Z[j]-maxd) continue;
+                d=sqrt((X[i]-X[j])^2+(Y[i]-Y[j])^2+(Z[i]-Z[j])^2);
+                if(d>mind && d<maxd) {
+                    # distance falls within range
+                    newbond=1;
+                    for(k=1;k<=nbonds[i]+0;++k){
+                        # woops, this bond already exists
+                        if(bond[i,k]==j){
+                            newbond=0;
+                            break;
+                        }
+                    }
+                    if(newbond) {
+                        # legitimate new bond, increment the list
+                        ++nbonds[i];
+                        bond[i,nbonds[i]]=j;
+                        bondlen[i,j]=d;
+                    }
+                    newbond=1;
+                    # check if reverse bond is already there
+                    for(k=1;k<=nbonds[j]+0;++k){
+                        if(bond[j,k]==i){
+                            newbond=0;
+                            break;
+                        }
+                    }
+                    if(newbond) {
+                        # also account for reverse bond
+                        ++nbonds[j];
+                        bond[j,nbonds[j]]=i;
+                        bondlen[j,i]=d;
+                    }
+                }
+            }
+        }
+
+        # now go through and force ideal bonds that we know about
+        for(i=1;i<=n;++i){
+            if(Occ[i]==0) continue;
+        }
+
+        # measure and store all currently applied displacement magnitudes
+        for(i=1;i<=n;++i){
+            master_dXYZ[i]=sqrt(dX[i]**2+dY[i]**2+dZ[i]**2);
+        }
+
+        # iterative application of thru-bond smoothing
+        for(l=1;l<=ncyc_thrubond;++l)
+        {
+            print "REMARK thru-bond averaging cycle",l
+            # loop over all atoms
+            for(i=1;i<=n;++i){
+                if(Occ[i]==0) continue;
+                realbonds=ddX[i]=ddY[i]=ddZ[i]=0;
+                # take every atom bonded to this atom
+                for(u=1;u<=nbonds[i];++u){
+                j = bond[i,u];
+                if(i==j) continue;
+                if(Occ[j]==0)continue;
+                ++realbonds;
+                ddX[i] += dX[j];
+                ddY[i] += dY[j];
+                ddZ[i] += dZ[j];
+            }
+            if(! realbonds) continue;
+                ddX[i] /= realbonds;
+                ddY[i] /= realbonds;
+                ddZ[i] /= realbonds;
+            }
+            # second pass to update delta-positions
+            for(i=1;i<=n;++i){
+                if(Occ[i]==0) continue;
+                bw=frac_thrubond;
+                if(Ee[i]=="H") bw=1;
+                dX[i] = (1-bw)*dX[i] + bw*ddX[i];
+                dY[i] = (1-bw)*dY[i] + bw*ddY[i];
+                dZ[i] = (1-bw)*dZ[i] + bw*ddZ[i];
+            }
+            # third pass to rescale shift magnitudes
+            if(l<=ncyc_magnforce)
+            {
+                mw=(1-(l-1)/(ncyc_magnforce-1))
+                ms=frac_magnforce
+                if(l>ncyc_magnforce)mw=0;
+                for(i=1;i<=n;++i){
+                    if(Occ[i]==0) continue;
+                    if(Ee[i]=="H") mw=0;
+                    mag = sqrt(dX[i]**2+dY[i]**2+dZ[i]**2);
+                    if(mag<=0.0) {
+                        continue;
+                        # make something up?
+                        mag=1e-6;
+                        dX[i]=mag*(rand()-0.5);
+                        dY[i]=mag*(rand()-0.5);
+                        dZ[i]=mag*(rand()-0.5);
+                    }
+                    # get difference between current and scaled version of originally prescribed shift magnitude
+                    dmag = (ms*master_dXYZ[i]-mag);
+                    # scale thet shift to be more like original magnitude
+                    scale = (mag+mw*dmag)/mag;
+                    dX[i] = scale*dX[i];
+                    dY[i] = scale*dY[i];
+                    dZ[i] = scale*dZ[i];
+#if(i==456) print "GOTHERE1",dX[i],dY[i],dZ[i],"    ",master_dXYZ[i],mag,"    ",dmag,scale,mw
+                }
+            }
+        }
     }
 
-    # now print out the new atom
-    printf("%s%8.3f%8.3f%8.3f %5.2f%6.2f%s\\n",substr(\$0,1,30),X,Y,Z,Occ,Bfac,substr(\$0,67));        
-}
 
-# also print everything else
-! /^ATOM/ && ! /^HETATM/ {print}
+    for(i=1;i<=n;++i)  
+    {
+        if(prefix[i] !~ /^ATOM|^HETAT/ )
+        {
+            print line[i];
+            continue;
+        }
+      
+        X[i] += dX[i];
+        Y[i] += dY[i];
+        Z[i] += dZ[i];
+      
+        # now print out the new atom
+        printf("%s%8.3f%8.3f%8.3f %5.2f%6.2f%s\\n",prefix[i],X[i],Y[i],Z[i],Occ[i],Bfac[i],rest[i]);        
+    }
+}
 
 
 

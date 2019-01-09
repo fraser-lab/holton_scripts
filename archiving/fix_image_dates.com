@@ -24,7 +24,8 @@ endif
 
 
 echo "finding all cbf and img files in $dir ..."
-find $dir \( -name '*.cbf' -o -name '*.img' \) -printf "%T@ %p\n" |\
+find $dir -name .snapshot -prune -o \
+    \( -name '*.cbf' -o -name '*.img' \) -printf "%T@ %p\n" |\
 sort -g >! image_files.txt
 
 # fix stupid filenames
@@ -169,12 +170,18 @@ rm ${parthing}_*.txt
 retouch:
 set parthing = retouch
 echo "double-checking for links with wrong date stamp"
-find $dir -type l -printf "%T@ " -exec ls -lL --time-style="+%b %d %H:%M:%S.%N %Z %Y %s" \{\} \; |\
-awk '{lepoch=$1;link=$NF;fepoch=$(NF-1);\
+find $dir -type l -printf "%T@ " -exec ls -lL --time-style="+%b %d %H:%M:%S.%N %Z %Y %s" \{\} \; |&\
+awk -v dir="$dir" '{lepoch=$1;fepoch=$12;\
+   link=substr($0,index($0,dir));\
    date=$7" "$8" "$9" "$10" "$11;\
    deltaT=sqrt((lepoch-fepoch)**2)}\
-   deltaT>1{print "touch -h --date=\""date"\"",link}' |\
+   lepoch ~ /[^0-9.]/ || fepoch ~ /[^0-9.]/{\
+      print "BAD LINK:",link;next;}\
+   deltaT>1{print "touch -h --date=\""date"\"","\""link"\""}' |\
 cat >! ${parthing}.txt
+egrep "^BAD LINK:" ${parthing}.txt | tee bad_links.txt
+egrep -v "^BAD LINK:"  ${parthing}.txt >! temp.txt
+mv -f temp.txt ${parthing}.txt
 wc -l ${parthing}.txt
 
 # see if there is any work to do
@@ -205,6 +212,11 @@ foreach cpu ( `seq 1 $CPUs` )
     cat ${parthing}_${cpu}.txt | tcsh &
 end
 wait
+rm ${parthing}_*.txt
+
+wc -l bad_links.txt
+echo "re-touching done."
+
 
 exit:
 if($?BAD) then

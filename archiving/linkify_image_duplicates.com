@@ -4,11 +4,13 @@
 #
 set dir = "$1"
 set pretend = "$2"
+set nosums = "$3"
 
 if(! -d "$dir") then
     set dir = alsenable/
 endif
 if("$pretend" == "pretend") setenv PRETEND
+if("$nosums" == "nosums") setenv NOSUMS
 
 
 set CPUs = `grep proc /proc/cpuinfo | wc -l | awk '{print $NF/2+1}'`
@@ -23,17 +25,19 @@ if(! -x ./image_md5_extract.com) then
 endif
 
 echo "finding all img and cbf files in $dir ..."
-find $dir -type f -size +0 \( -name '*.cbf' -o -name '*.img' \) -printf "%T@ %p\n" |\
+find $dir -name .snapshot -prune -o \
+   -type f -size +0 \( -name '*.cbf' -o -name '*.img' \) -printf "%T@ %p\n" |\
   awk -v dir=$dir '{file=substr($0,index($0,dir));\
-    print $1,length(file),file}' |\
+    print ( ! /OVERWRITTEN_FILES/ ),length(file),$1,file}' |\
   sort -g |\
-  awk '{$2="";print}' >! image_files.txt
+  awk '{print substr($0,index($0,$3))}' >! image_files.txt
 echo "finding all img and cbf links in $dir ..."
-find $dir -type l \( -name '*.cbf' -o -name '*.img' \) -printf "%T@ %p\n" |\
+find $dir -name .snapshot -prune -o \
+   -type l \( -name '*.cbf' -o -name '*.img' \) -printf "%T@ %p\n" |\
   awk -v dir=$dir '{file=substr($0,index($0,dir));\
-    print $1,length(file),file}' |\
+    print ( ! /OVERWRITTEN_FILES/ ),length(file),$1,file}' |\
   sort -g |\
-  awk '{$2="";print}'>! image_links.txt
+  awk '{print substr($0,index($0,$3))}'>! image_links.txt
 
 # fix stupid filenames
 awk 'NF>2' image_files.txt |\
@@ -46,7 +50,7 @@ tee change_stupidnames.txt
 
 set test = `cat change_stupidnames.txt | wc -l`
 if($test) then
-    set BAD = "files have stupid names: run change_stupidnames.txt"
+    set BAD = "files have stupid names: run change_stupidnames.txt if you dare"
     goto exit
 endif
 
@@ -95,13 +99,13 @@ wc -l ${parthing}_todo.txt
 set test = `cat ${parthing}_todo.txt | wc -l`
 if($test < 100) then
     echo "doing $parthing "
-    if($?PRETEND) goto sortsums
+    if($?NOSUMS) goto sortsums
     cat ${parthing}_todo.txt | tcsh >> ${parthing}.txt
     sort -g ${parthing}.txt >! new.txt
     mv new.txt ${parthing}.txt
     goto sortsums
 endif
-if($?PRETEND) goto sortsums
+if($?NOSUMS) goto sortsums
 
 # split up work on multiple CPUs
 echo "doing $parthing in parallel "

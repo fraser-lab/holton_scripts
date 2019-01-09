@@ -22,7 +22,7 @@ endif
 # place for temporary file list
 mkdir -p /tmp/${USER}/
 set tempfile = /tmp/${USER}/rsync_temp$$
-setenv RSYNC_PASSWORD ALS3n8bl
+setenv RSYNC_PASSWORD blahblahblah
 
 # retrieve the date cutoff file
 echo "getting too-old cutoff date file from server..."
@@ -38,8 +38,9 @@ touch --date="$date" ${tempfile}date_cutoff.txt
 echo "looking for files in $dir created after $date"
 
 # find new files worth backing up
-find $dir -newer ${tempfile}date_cutoff.txt -type f -printf "%T@ %P\n" |\
-egrep '.gz$|.cbf$|.img$|.scan$|.jpg$|.jpeg$|[0-9]_[0-9][0-9][0-9][0-9][0-9].txt$|ExptParams|Izero.txt$' |\
+find $dir -name .snapshot -prune -o \
+    -newer ${tempfile}date_cutoff.txt -type f -printf "%T@ %P\n" |\
+egrep '.gz$|.cbf$|.img$|.scan$|.jpg$|.jpeg$|[0-9]_[0-9][0-9][0-9][0-9][0-9].txt$|ExptParams|Izero.txt$|ASC$|.dat$' |\
 awk '( /.cbf$/ || /.cbf.gz$/ ) && / FRAME| GAIN| ABS| ABSORP| BKGINIT| BKGPIX| BLANK| DECAY| MODPIX|-CORRECTIONS/{next}\
     {print}' |\
 sort -g |\
@@ -49,17 +50,17 @@ set files = `cat ${tempfile}2bxfered.txt | wc -l`
 echo "$files candidates for transfer"
 
 if( 0 ) then
+    # this should help, but in reality only makes things slower for some reason
+    mv ${tempfile}2bxfered.txt ${tempfile}newenough.txt
 
-mv ${tempfile}2bxfered.txt ${tempfile}newenough.txt
+    # get files that are already there
+    echo "getting remote list of filenames"
+    rsync --list-only -r alsenable@bl831.als.lbl.gov::ALS-ENABLE/${beamline}/${rdir} >! ${tempfile}remote_files.txt
 
-# get files that are already there
-echo "getting remote list of filenames"
-rsync --list-only -r alsenable@bl831.als.lbl.gov::ALS-ENABLE/${beamline}/${rdir} >! ${tempfile}remote_files.txt
-
-echo "reconciling local and remote files."
-cat ${tempfile}remote_files.txt ${tempfile}newenough.txt |\
-awk 'NF==1 && ! seen[$NF]{print} /^-/{++seen[$NF]}' |\
-cat >! ${tempfile}2bxfered.txt
+    echo "reconciling local and remote files."
+    cat ${tempfile}remote_files.txt ${tempfile}newenough.txt |\
+    awk 'NF==1 && ! seen[$NF]{print} /^-/{++seen[$NF]}' |\
+    cat >! ${tempfile}2bxfered.txt
 endif
 
 # now do the actual transfer
