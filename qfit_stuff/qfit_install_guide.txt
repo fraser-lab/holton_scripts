@@ -1,0 +1,84 @@
+#! /bin/tcsh -f
+#
+#   the following is an example guide for successfully installing qfit3 using miniconda
+#
+#
+# bash
+installdir=/programs/qfit3
+# tcsh
+set installdir = /programs/qfit3
+
+# conda installer needs non-existent directory
+rm -rf $installdir
+
+cd ~/Downloads/
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+chmod a+x Miniconda3-latest-Linux-x86_64.sh 
+./Miniconda3-latest-Linux-x86_64.sh
+# this will prompt you for inputs, recommend you accept the license,
+# indicate the installer directory explicitly, and ask for the bash mod,
+# like this:
+# yes
+# /programs/qfit3
+# yes
+# this has modified your ~/.bashrc file.  In case you dont want that
+# here is how to restore your bashrc and make an optional setup file
+cd $installdir
+awk '/>>> conda init/,/<<< conda init/' ~/.bashrc > setup_sourceme.bash
+mv ~/.bashrc-miniconda3.bak ~/.bashrc
+
+#  and this setup file will work for tcsh users
+cd $installdir
+cat << EOF | tee setup_sourceme.csh
+source ${installdir}/etc/profile.d/conda.csh
+set CONDA_CHANGEPS1 = ( false conda activate base )
+setenv PATH ${installdir}/bin:\$PATH
+EOF
+
+# now let us use this setup file
+# you can run both of these lines in either shell, only one will work
+# bash
+. /programs/qfit3/setup_sourceme.bash 
+# bash
+source /programs/qfit3/setup_sourceme.csh 
+
+# now we use conda to set things up
+conda install -c conda-forge -c ibmdecisionoptimization numpy scipy cvxopt cplex
+# y
+
+
+# we also need this library for qfit to work
+git clone https://github.com/oxfordcontrol/miosqp.git
+cd miosqp
+python setup.py install
+
+
+# now we do the actual qfit install
+cd $installdir
+git clone https://github.com/excitedstates/qfit-3.0
+cd qfit-3.0
+python setup.py install
+
+# might need this for tcsh shell
+rehash
+
+# now lets test the example
+cd example
+qfit_protein ./3K0N.mtz -l 2FOFCWT,PH2FOFCWT ./3K0N.pdb -bb -sa -T -s 5 -rn 45 -v
+
+# and dont forget the post-refine script
+cp ${installdir}/qfit-3.0/scripts/post_refine_phenix.csh .
+# vi post_refine_phenix.csh
+# might need to edit the "source" line
+./post_refine_phenix.csh multiconformer_model2.pdb ./3K0N.mtz IOBS SIGIOBS
+
+
+
+
+
+
+
+
+
+
+
