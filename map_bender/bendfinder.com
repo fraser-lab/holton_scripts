@@ -1108,6 +1108,14 @@ head -c ${header} ${tempfile}header.map >! ${tempfile}new.map
 awk '/PEEK-A-BOO/{print $NF}' ${tempfile}mappeek.log |\
 floatgen >> ${tempfile}new.map
 
+# test to see if map interpolation worked
+set test = `ls -l ${tempfile}new.map | awk '{print ( $5 > 100 )}'`
+if("$test" != "1") then
+    stat ${tempfile}expanded.map
+    set BAD = "unable to interpolate ${tempfile}expanded.map. can $mapman read the file ? "
+    goto exit
+endif
+
 # force rewrite of header stats
 echo scale factor 1 |\
 mapmask mapin ${tempfile}new.map mapout bent${order}.map > $logfile
