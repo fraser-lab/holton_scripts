@@ -1,6 +1,6 @@
 #! /bin/tcsh -f
 #
-#    origins.com                    - James Holton 3-3-18
+#    origins.com                    - James Holton 9-18-19
 #
 #    script for translating one PDB to a number of alternative origins
 #       and indexing conventions
@@ -316,7 +316,7 @@ EOF
 cp -p ${tempfile}sfalled.mtz ${tempfile}reindexme.mtz
 
 # now loop over all real-space reindexing operators and see what they do in reciprocal space
-rm -f xyz_hkl_cell.log
+rm -f ${tempfile}xyz_hkl_cell.log
 foreach reindexing ( $reindexings )
     pdbset xyzin ${tempfile}reindexme.pdb xyzout ${tempfile}.pdb << EOF > /dev/null
     symgen $reindexing
@@ -338,7 +338,7 @@ EOF
     set cell = `echo head | mtzdump hklin ${tempfile}reindexed.mtz | awk '/Cell Dimensions/{getline;getline;print}'`
     echo "$reindexing   $hkl   $cell" |\
      awk '{printf("%-20s %-10s %s %s %s %s %s %s\n",$1,$2,$3,$4,$5,$6,$7,$8)}' |\
-     tee -a xyz_hkl_cell.log
+     tee -a ${tempfile}xyz_hkl_cell.log
 end
 
 
@@ -491,16 +491,27 @@ endif
 rm -f ${tempfile}origins
 rm -f ${tempfile}symops
 
+if( $?NO_DECONV ) then
+    echo "skipping deconvolution step, using origins: $origins"
+    set reindexings = +X,+Y,+Z
+    set best_reindexing_origin = "+X,+Y,+Z_0,0,0"
+    set reindexing_origins = `echo $origins | awk '{for(i=1;i<=NF;++i){print "+X,+Y,+Z_"$i}}'`
+    echo "$reindexings  h,k,l $CELL" |\
+     awk '{printf("%-20s %-10s %s %s %s %s %s %s\n",$1,$2,$3,$4,$5,$6,$7,$8)}' |\
+    cat >! ${tempfile}xyz_hkl_cell.log
+    goto skip_deconv
+endif
 
 
+deconvolute:
 # preemtive:
 rm -f ${tempfile}all_reindexing_origins.txt
 
 # use deconvolution to find optimal shift
 foreach reindexing ( $reindexings )
     echo "applying $reindexing to $wrong_pdb"
-    set CELL = `awk -v key="$reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' xyz_hkl_cell.log`
-    set reindexing_hkl = `awk -v key="$reindexing" '$1==key{print $2;exit}' xyz_hkl_cell.log`
+    set CELL = `awk -v key="$reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' ${tempfile}xyz_hkl_cell.log`
+    set reindexing_hkl = `awk -v key="$reindexing" '$1==key{print $2;exit}' ${tempfile}xyz_hkl_cell.log`
     echo "new cell: $CELL"
 
     # apply the re-indexing operation, which is done in lattice cell
@@ -683,6 +694,11 @@ EOF
     tee ${tempfile}likely_origins.txt
     wc -l ${tempfile}likely_origins.txt | awk '{print $1,"origins added."}'
 
+    # gather stats in case we need them
+    if(! $?maxpeak) set maxpeak = 0
+    set thismax = `awk -v scale=$scale '{print $6/scale}' ${tempfile}peak.txt |& sort -gr |& head -n 1`
+    set maxpeak = `echo $thismax $maxpeak | awk '$2>$1{$1=$2} {print $1}'`
+
     # clean up a bit
     rm -f ${tempfile}right.mtz ${tempfile}wrong.mtz
     rm -f ${tempfile}del.mtz ${tempfile}del.map
@@ -735,20 +751,37 @@ EOF
     endif
 end
 
-wc -l ${tempfile}all_reindexing_origins.txt | awk '{print $1,"possible origins to explore."}'
+set test = `cat ${tempfile}all_reindexing_origins.txt | wc -l`
+echo "$test possible origins to explore."
+if("$test" == "" || "$test" == "0") then
+    set test = `echo $min_opeak $maxpeak | awk '{print ($1>$2)}'`
+    if($test) then
+        set min_opeak = `echo $maxpeak | awk '{print $1*0.9}'`
+        echo "re-setting min_opeak to $min_opeak "
+        goto deconvolute
+    endif
+    set test = `echo $min_opeak 1 | awk '{print ($1>$2)}'`
+    if($test) then
+        echo "re-setting min_opeak to 1 "
+        set min_opeak = 1
+        goto deconvolute
+    endif
+    set BAD = "no significant origin peaks"
+    goto exit
+endif
 
 sort -gr ${tempfile}all_reindexing_origins.txt >! ${tempfile}neworigins.txt
 set reindexing_origins = `awk '{ro=$7"_"$3} ! seen[ro]{print ro} {++seen[ro]}' ${tempfile}neworigins.txt`
 set best_reindexing = `awk '{print $7;exit}' ${tempfile}neworigins.txt`
-set CELL = `awk -v key="$best_reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' xyz_hkl_cell.log`
-set reindexing_hkl = `awk -v key="$best_reindexing" '$1==key{print $2;exit}' xyz_hkl_cell.log`
+set CELL = `awk -v key="$best_reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' ${tempfile}xyz_hkl_cell.log`
+set reindexing_hkl = `awk -v key="$best_reindexing" '$1==key{print $2;exit}' ${tempfile}xyz_hkl_cell.log`
 
 #rm -f ${tempfile}all_reindexing_origins.txt ${tempfile}neworigins.txt
 
 #set reindexing_origins = `seq -1 0.05 2 | awk '{print "+X,+Y,+Z_0,"$1",0"}'`
 #echo "GOTHERE: $reindexing_origins"
 
-
+skip_deconv:
 ########################################
 # now run through all origins, and chain pairings
 echo "chain                           origin "
@@ -846,8 +879,8 @@ endif
 
 # break up the origin string
 set reindexing = `echo $reindexing_origin | awk -F "_" '{print $1}'`
-set CELL = `awk -v key="$reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' xyz_hkl_cell.log`
-set reindexing_hkl = `awk -v key="$reindexing" '$1==key{print $2;exit}' xyz_hkl_cell.log`
+set CELL = `awk -v key="$reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' ${tempfile}xyz_hkl_cell.log`
+set reindexing_hkl = `awk -v key="$reindexing" '$1==key{print $2;exit}' ${tempfile}xyz_hkl_cell.log`
 
 set origin = `echo $reindexing_origin | awk -F "_" '{print $2}'`
 set Xf = `echo "$origin" | awk -F "," '{print $1}'`
@@ -1105,8 +1138,8 @@ foreach line ( `awk '{print NR}' ${tempfile}best_scores` )
     set z     = `awk -v chain=$wrong_chain '$2==chain{print $9+$12}' ${tempfile}best_scores`
     set symop = `awk -v chain=$wrong_chain '$2==chain{print $13}' ${tempfile}best_scores`
 
-    set CELL = `awk -v key="$reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' xyz_hkl_cell.log`
-    set reindexing_hkl = `awk -v key="$reindexing" '$1==key{print $2;exit}' xyz_hkl_cell.log`
+    set CELL = `awk -v key="$reindexing" '$1==key{print $3,$4,$5,$6,$7,$8;exit}' ${tempfile}xyz_hkl_cell.log`
+    set reindexing_hkl = `awk -v key="$reindexing" '$1==key{print $2;exit}' ${tempfile}xyz_hkl_cell.log`
 
     # retrieve score
     set score  = `awk -v chain=$wrong_chain '$2==chain{print -$14}' ${tempfile}best_scores`
@@ -1310,6 +1343,10 @@ echo "Overall ${SCORE}: $score"
 
 #clean up
 exit:
+if($?BAD) then
+    echo "ERROR: $BAD"
+    exit 9
+endif
 if($?debug) exit
 rm -f ${tempfile}rmsd.awk >& /dev/null
 rm -f ${tempfile}out.pdb >& /dev/null
@@ -1398,9 +1435,13 @@ foreach arg ( $* )
         # whole file is one chain
         set BYFILE
     endif
-    if("$arg" == "noorigins") then
+    if("$arg" == "noorigins" || "$arg" == "noorigin") then
         # just symmetry search
         set NO_ORIGINS
+    endif
+    if("$arg" =~ nodecon*) then
+        # dangerous for polar space groups
+        set NO_DECONV
     endif
     if("$arg" == "fast") then
         # skip several steps
