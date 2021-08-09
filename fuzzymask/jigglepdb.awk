@@ -1,7 +1,7 @@
 #! /bin/awk -f
 #
 #
-#        Jiggles a pdb file's coordinates by some random value
+#        Jiggles a pdb file's coordinates by some random value                 -James Holton 1-18-20
 #        run like this:
 #
 #        jigglepdb.awk -v seed=2343 -v shift=1.0 old.pdb >! jiggled.pdb
@@ -21,6 +21,8 @@ BEGIN {
     if(pshift == "LorentzB") pshift = "Lorentzian B"
     if(seed) srand(seed+0)
     if(! keepocc) keepocc=0
+    if(! independent_confsel) independent_confsel=0
+    if(! disulfide_links) disulfide_links=0
     if(! distribution) distribution="gaussian";
     if(! frac_thrubond) frac_thrubond=0.5
     if(! ncyc_thrubond) ncyc_thrubond=0
@@ -37,6 +39,7 @@ BEGIN {
     print "REMARK frac_thrubond=",frac_thrubond,"ncyc_thrubond=",ncyc_thrubond
     print "REMARK frac_magnforce=",frac_magnforce,"ncyc_magnforce=",ncyc_magnforce
     print "REMARK random number seed: " seed+0
+    if(! keepocc && ! independent_confsel) print "REMARK global conf sel: " global_confsel
 }
 
 # count all lines
@@ -66,17 +69,65 @@ BEGIN {
     Restyp[n] = substr($0, 18, 3)
     Segid[n]  = substr($0, 22, 1)            # O/Brookhaven-style segment ID
     Resnum[n] = substr($0, 23, 4)+0
+    Insert[n] = substr($0, 27, 1)
     X[n]      = substr($0, 31, 8)+0
     Y[n]      = substr($0, 39, 8)+0
     Z[n]      = substr($0, 47, 8)+0
     Occ[n]    = substr($0, 55, 6)+0
     Bfac[n]   = substr($0, 61, 6)+0
     rest[n]   = substr($0, 67)
+    # keep track of groupings
+    atomtype = Atomtype[n]" "Restyp[n]
+    residue = Restyp[n]" "Segid[n]" "Resnum[n] Insert[n];
+    ++atoms_in[residue];
+    sr = Segid[n]" "Resnum[n];
+    csr = Conf[n]" "Segid[n]" "Resnum[n];
+
+    if(Restyp[n]=="CYS") {
+        ++has[sr];
+        ++has[csr];
+    }
 #    ATOM   = toupper(substr($0, 1, 6))
 #######################################################################################
 }
 
+# may want to "link" disulfide bonds
+/^SSBOND/{
+    ++found_disulfides
+
+    s1=substr($0,16,1)
+    r1=substr($0,18,4)+0
+    s2=substr($0,30,1)
+    r2=substr($0,32,4)+0
+
+    sr1=s1" "r1
+    sr2=s2" "r2
+    disulfide_mate[sr2] = sr1
+    disulfide_mate[sr1] = sr2
+}
+/^LINK/{
+    ++found_disulfides
+
+    c1=substr($0,17,1)
+    s1=substr($0,22,1)
+    r1=substr($0,23,4)+0
+    c2=substr($0,47,1)
+    s2=substr($0,52,1)
+    r2=substr($0,53,4)+0
+    sr1=s1" "r1
+    sr2=s2" "r2
+    csr1=c1" "s1" "r1
+    csr2=c2" "s2" "r2
+    disulfide_mate[sr2] = sr1
+    disulfide_mate[sr1] = sr2
+    disulfide_mate[csr2] = csr1
+    disulfide_mate[csr1] = csr2
+}
+
 END{
+  if(disulfide_links && ! found_disulfides) {
+      print "REMARK warning, no disulfides found"
+  }
 
   # min/max bond lengths
   if(min_bond_d == "") min_bond_d = 1
@@ -86,6 +137,12 @@ END{
   for(i=1;i<=n;++i)
   {
     if(prefix[i] !~ /^ATOM|^HETAT/ ) continue;
+
+    # abbreviations
+    atomtype = Atomtype[i]" "Restyp[i]
+    residue = Restyp[i]" "Segid[i]" "Resnum[i] Insert[i];
+    sr = Segid[i]" "Resnum[i];
+    csr = Conf[i]" "Segid[i]" "Resnum[i];
 
     if(shift_opt=="byB" || shift_opt=="LorentzB"){
         # switch on "thermal" shift magnitudes
@@ -104,22 +161,16 @@ END{
         # randomly "skip" conformers with occ<1
         if(Occ[i]+0<1){
             # remember all occupancies
-            if(conf_hi[Conf[i],Segid[i],Resnum[i]]==""){
-                conf_lo[Conf[i],Segid[i],Resnum[i]]=cum_occ[Segid[i],Resnum[i]]+0;
-                cum_occ[Segid[i],Resnum[i]]+=Occ[i];
-                conf_hi[Conf[i],Segid[i],Resnum[i]]=cum_occ[Segid[i],Resnum[i]];
+            if(conf_hi[csr]==""){
+                conf_lo[csr]=cum_occ[sr]+0;
+                cum_occ[sr]+=Occ[i];
+                conf_hi[csr]=cum_occ[sr];
             }
         }
     }
     if(shift_opt == "LorentzB")
     {
         distribution = "Lorentz"
-    }
-    if(distribution == "Lorentz")
-    {
-        dx = lorentzrand(shift/sqrt(3));
-        dy = lorentzrand(shift/sqrt(3));
-        dz = lorentzrand(shift/sqrt(3));
     }
     
     if(distribution == "gaussian" || distribution == "Gauss")
@@ -142,6 +193,21 @@ END{
         dy *= shift;
         dz *= shift;
     }
+    if(distribution == "Lorentz")
+    {
+        mag = lorentzrand(shift); 
+        dR=2
+        while(dR>1 || dR < 0.1)
+        {
+            dx = (2*rand()-1);
+            dy = (2*rand()-1);
+            dz = (2*rand()-1);
+            dR = sqrt(dx^2+dy^2+dz^2);
+        }
+        dx *= mag/dR;
+        dy *= mag/dR;
+        dz *= mag/dR;
+    }
 
     dX[i] = dx;
     dY[i] = dy;
@@ -152,20 +218,44 @@ END{
     if(Oshift+0>0) Occ[i] += gaussrand(Oshift)
     
     # use same occopancy for given conformer
-    if(! keepocc && conf_hi[Conf[i],Segid[i],Resnum[i]]!=""){
+    if(! keepocc && conf_hi[csr]!=""){
         # use same random number for all conformer choices
         confsel = global_confsel;
         # unless occupancies do not add up
-        if(Conf[i]==" "){
-            # save this for later?
-            confsel = rand();
+        # or if user selected no correlation between conformer selections
+        if(Conf[i]==" " || independent_confsel){
+            # save this for later
+            if(confsel_of[sr]=="") {
+                confsel_of[sr] = rand();
+                if(disulfide_links && disulfide_mate[sr] != "") {
+                    confsel_of[disulfide_mate[sr]]=confsel_of[sr];
+                }
+            }
+        }
+        else
+        {
+            # assume "A" is most popular and all "A" confs go together
+            confsel_of[sr] = global_confsel;
         }
         Occ[i] = 0;
         # atom only exists if it falls in the chosen interval
-        lo=conf_lo[Conf[i],Segid[i],Resnum[i]];
-        hi=conf_hi[Conf[i],Segid[i],Resnum[i]];
+        confsel = confsel_of[sr];
+        lo=conf_lo[csr];
+        hi=conf_hi[csr];
         if(lo < confsel && confsel <= hi) Occ[i]=1;
     }
+    # override all of the above if conformer is already selected
+    if(confletter_of[sr]!="") 
+    {
+        Occ[i]=0;
+        if(Conf[i] == confletter_of[sr]) Occ[i]=1;
+    }
+    if(disulfide_mate[sr]!="" && has[Conf[i]" "disulfide_mate[sr]])
+    {
+        confletter_of[disulfide_mate[sr]]=confletter_of[sr];
+    }
+    # lock in conformer letter
+    if(Occ[i]==1) confletter_of[sr]=Conf[i];
   }
 
 
@@ -177,6 +267,10 @@ END{
             #skip zero occupancy
             if( Occ[i]==0 ) continue;
             for(j=1;j<i;++j){
+                # skip big distances for speed
+                if(X[i]>X[j]+10 || X[i]<X[j]-10) continue;
+                if(Y[i]>Y[j]+10 || Y[i]<Y[j]-10) continue;
+                if(Z[i]>Z[j]+10 || Z[i]<Z[j]-10) continue;
                 # skip zero occupancy
                 if( Occ[j]==0 ) continue;
                 # skip nonsencial conformer relationships?
@@ -227,6 +321,7 @@ END{
                 }
             }
         }
+        print "REMARK done measuring bond lengths"
 
         # now go through and force ideal bonds that we know about
         for(i=1;i<=n;++i){
