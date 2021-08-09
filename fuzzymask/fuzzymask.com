@@ -43,7 +43,7 @@ set ncyc_data = 0
 set seeds = 500
 set user_CPUs  = auto
 
-# grid spacing to use for map, default is to let refmac choose
+# grid spacing to use for map, default is to let refmac choose because refmac wont listen
 set GRID = ""
 
 # output map files
@@ -143,6 +143,12 @@ set kick_scale_step = `echo $kick_scale $kick_steps | awk '{print $1/$2}'`
 #set drykick_scale_step = `echo $drykick_scale $kick_steps | awk '{print $1/$2}'`
 set drykick_scale_step = $drykick_scale
 
+set refmacgrid = ""
+if("$GRID" != "") then
+    # refmac will not accept this!!!  How do we do it?
+    set refmacgrid = "GRID $GRID"
+endif
+
 # create the refmac script we will run on each cpu
 cat << EOF-script >! refmac_cpu.com
 #! /bin/tcsh -f
@@ -235,6 +241,7 @@ refmac5 xyzin \${tempfile}seed\${seed}minimized.pdb \
     hklout \${tempfile}seed\${seed}out.mtz << EOF-refmac
 #vdwrestraints 0
 $otheropts
+$refmacgrid
 ncyc $ncyc_data
 solvent vdwprobe $vdwprobe ionprobe $ionprobe rshrink $rshrink
 solvent yes
@@ -988,6 +995,8 @@ foreach arg ( $* )
     if("$arg" =~ mapout=*) set mapout = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ coordmap=*) set coordmap = `echo $arg | awk -F "=" '{print $2}'`
     if("$arg" =~ pdbfile=*) set pdbfile = `echo $arg | awk -F "=" '{print $2}'`
+    # this does not work
+    if("$arg" =~ grid=*) set GRID = `echo $arg | awk -F "=" '{print $2}' | awk -F "," '{print $1,$2,$3}'`
 end
 
 # bug out here if we cant run
