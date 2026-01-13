@@ -1318,7 +1318,7 @@ EOF-sfall
 
     # encode the atomic CCs as an occupancy in a new PDB file
     cat ${tempfile}atomcodes.txt ${tempfile}atom_corr.txt $right_pdb |\
-    awk '/^code /{name[$2+0]=substr($0,11,26);next} /^ATOMCC /{occ[$2]=$3;next} ! /^ATOM/ {print}\
+    awk '/^code /{name[$2+0]=substr($0,11,26);next} /^ATOMCC /{occ[$2]=$3;next} ! /^ATOM|^HETAT/ {print}\
       /^ATOM|^HETATM/{++n;\
     if(name[n]=="" || occ[n]+0<0.01){name[n]=substr($0,1,26);occ[x]=substr($0,55,6)+0};\
     printf "%26s%28s%6.2f%s\n", name[n],substr($0,27,28),occ[n],substr($0,61)}' |\
@@ -1431,6 +1431,9 @@ foreach arg ( $* )
     if("$arg" == "altindex") then
         set ALTINDEX
     endif
+    if("$arg" == "debug") then
+        set debug
+    endif
     if("$arg" == "nochains" || "$arg" == "byfile") then
         # whole file is one chain
         set BYFILE
@@ -1479,6 +1482,8 @@ end
 if((! -e "$right_pdb")||(! -e "$wrong_pdb")) then
     goto Help
 endif
+
+if($?debug) set tempfile = ./origins_temp
 
 
 # deploy rmsd awk program
@@ -1625,11 +1630,12 @@ P2 P21 C2
  1/2   y   0
  1/2   y 1/2
 
-P222 P2221 P21212 P212121 C2221 C222 I222 I212121 F432 F4132 
+P222 P2221 P2212 P2122 P21212 P21221 P22121 P212121 C2221 C222 I222 I212121 F432 F4132 
    0   0   0
    0   0 1/2
    0 1/2   0
    0 1/2 1/2
+-1/2   0   0
  1/2   0   0
  1/2   0 1/2
  1/2 1/2   0

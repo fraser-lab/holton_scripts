@@ -119,17 +119,20 @@ set test = `dials.version |& egrep "DIALS" | wc -l`
 if ("$test" == "1") goto checkimages
 
 # need to install dials
-set suffix = linux-x86_64.tar.gz
-if($uname == Darwin) set suffix = macosx.tar.gz
-wget http://dials.diamond.ac.uk/diamond_builds/dials-$suffix
-tar xzf dials-$suffix
-rm -f dials-$suffix/
+set platform = linux-x86_64
+if($uname == Darwin) set platform = macosx
+rm -f dials-*/
+wget https://dials.github.io/installation.html
+set url = `awk 'BEGIN{RS="\""} /^https/ && /tar/{print}' installation.html | grep $platform | head -n 1`
+set file = `echo $url | awk -F "/" '{print $NF}'`
+if(! -r "$file") wget $url
+tar xf $file
 
-cd dials-installer-dev
+cd dials-installer
 ./install --prefix=../
 cd ..
-rm -rf dials-installer-dev
-source dials-dev*/dials_env.csh 
+rm -rf dials-installer
+source dials-*/dials_env.csh 
 
 # see if all that was worth it...
 set test = `dials.version |& egrep "DIALS" | wc -l`
@@ -153,14 +156,26 @@ if($images != 360) then
 endif
 
 
-set test = `md5sum data/core_001.cbf | awk '{print ($1 == "6dc7547f81cf7ada0b69db3e91cd0792")}'`
-if("$test" == "") set test = `sum data/core_001.cbf | awk '{print ($1 == "29901" || $1 == "28925" )}'`
-if("$test" != "1") then
-        set BAD = "data/core_001.cbf does not match expected checksum. corrupted?"
-        if(! $?IGNORE) goto exit
+# see if image is binary identical to expectations
+set test = `md5sum data/core_001.cbf | awk '{print ($1 == "6dc7547f81cf7ada0b69db3e91cd0792" )}'`
+if("$test" != "1") set test = `sum data/core_001.cbf | awk '{print ($1 == "29901" || $1 == "36476" || $1 == "28925" || $1 == "53125")}'`
+if("$test" != "1" && ! $?MD5CHECKED) then
+        md5sum data/core_001.cbf
+        sum data/core_001.cbf
+        set BAD = "data/core_001.cbf does not match expected MD5 sum. corrupted?"
+        echo "WARNING: $BAD"
+        echo "continue anyway? [Yn]"
+        set test = "no"
+        # ignore if output is not a terminal
+        test -t 1
+        if(! $status) then
+            set test = ( $< )
+        endif
+        if( "$test" !~ n*) goto skip_md5
+        goto exit
     endif
 endif
-
+skip_md5:
 
 
 if (! -x ./log_timestamp.tcl) then
@@ -223,44 +238,78 @@ set xferrate = `( tar cf - data/ | dd bs=10485760 of=/dev/null ) |& awk 'END{gsu
 dials.version >&! version.log
 set progversion = `cat version.log`
 
-rm -f datablock.json
+set datablock = datablock.json
+set datablock = imported_experiments.json
+set datablock = imported.expt
+set indexed   = experiments.json
+set indexed   = indexed_experiments.json
+set indexed   = indexed.expt
+set refined   = experiments.json
+set refined   = refined_experiments.json
+set refined   = refined.expt
+set integrated = integrated_experiments.json
+set integrated = integrated.expt
+set strongpickle = strong.pickle
+set strongpickle = strong.refl
+set indexedpickle = indexed.pickle
+set indexedpickle = indexed.refl
+set refinedpickle = refined.pickle
+set refinedpickle = refined.refl
+set integratedpickle = integrated.pickle
+set integratedpickle = integrated.refl
+set outputmtz  = integrated.mtz
+
+rm -f $datablock
 dials.import template=data/test_\#\#\#\#\#.cbf                       |&  $timestamper >! import.log
-if(! -s datablock.json) then
+if(! -s $datablock) set datablock = datablock.json
+if(! -s $datablock) set datablock = imported.expt
+if(! -s $datablock) then
     rm -f import.log
     set BAD = "import failed"
     goto exit
 endif
-rm -f strong.pickle
-dials.find_spots datablock.json nproc=$nproc                         |& $timestamper >! findspots.log
-if(! -s strong.pickle) then
+rm -f $strongpickle
+dials.find_spots $datablock nproc=$nproc                         |& $timestamper >! findspots.log
+if(! -s $strongpickle) set strongpickle = strong.pickle
+if(! -s $strongpickle) then
     rm -f findspots.log
     set BAD = "find_spots failed"
     goto exit
 endif
-rm -f indexed.pickle
-dials.index datablock.json strong.pickle space_group=P43212          |& $timestamper >! index.log
-if(! -s indexed.pickle) then
+rm -f $indexedpickle
+dials.index $datablock $strongpickle space_group=P43212          |& $timestamper >! index.log
+if(! -s $indexedpickle) set indexedpickle = indexed.pickle
+if(! -s $indexedpickle) then
     rm -f index.log
     set BAD = "index failed"
     goto exit
 endif
-rm -f refined.pickle
-dials.refine experiments.json indexed.pickle                         |& $timestamper >! refine.log
-if(! -s refined.pickle) then
+if(! -s $indexed ) set indexed   = experiments.json 
+if(! -s $indexed ) set indexed   = indexed.expt 
+rm -f $refinedpickle
+dials.refine $indexed $indexedpickle                                |& $timestamper >! refine.log
+if(! -s $refinedpickle) then
     rm -f refine.log
     set BAD = "refine failed"
     goto exit
 endif
-rm -f integrated.pickle
-dials.integrate refined_experiments.json refined.pickle nproc=$nproc |& $timestamper >! integrate.log
-if(! -s integrated.pickle) then
+if(! -s $refined ) set refined   = refined_experiments.json
+if(! -s $refined ) set refined   = refined.expt 
+rm -f $integratedpickle
+dials.integrate $refined $refinedpickle nproc=$nproc |& $timestamper >! integrate.log
+if(! -s $integratedpickle) set integratedpickle = integrated.pickle
+if(! -s $integratedpickle) set integratedpickle = integrated.refl
+if(! -s $integratedpickle) then
     rm -f integrate.log
     set BAD = "integrate failed"
     goto exit
 endif
-rm -f integrated.mtz
-dials.export integrated_experiments.json integrated.pickle           |& $timestamper >!  export.log
-if(! -s integrated.mtz) then
+if(! -s $integrated ) set integrated   = integrated_experiments.json
+if(! -s $integrated ) set integrated   = integrated.expt 
+rm -f $outputmtz
+dials.export $integrated $integratedpickle           |& $timestamper >!  export.log
+if(! -s $outputmtz) set outputmtz = integrated.mtz
+if(! -s $outputmtz) then
     rm -f export.log
     set BAD = "export failed"
     goto exit
@@ -273,6 +322,11 @@ set indextime = `awk 'END{print $8}' index.log`
 set refinetime = `awk '/Total time taken:/{print $NF}' dials.refine.log`
 set integtime = `awk '/Total time taken:/{print $NF}' dials.integrate.log`
 set exporttime = `awk 'END{print $8}' export.log`
+
+if("$findtime" == "") set findtime = `awk 'END{print $8}' findspots.log`
+if("$refinetime"  == "") set refinetime = `awk 'END{print $8}' refine.log`
+if("$integtime" == "") set integtime = `awk 'END{print $8}' integrate.log`
+
 if("$importtime"  == "") set importtime = "n/d"
 if("$findtime" == "") set findtime = "n/d"
 if("$indextime"  == "") set indextime = "n/d"
@@ -326,7 +380,7 @@ endif
 echo "sending results..."
 set sanskrit = `gzip -c results.txt | base64 | awk '{gsub("/","_");gsub("[+]","-");printf("%s",$0)}'`
 if("$sanskrit" != "") then
-    curl http://bl831.als.lbl.gov/dials_bench$sanskrit > /dev/null
+    curl https://bl831.als.lbl.gov/dials_bench$sanskrit > /dev/null
 endif
 if($status || "$sanskrit" == "") then
     echo "ERROR: please send file results.txt manually to JMHolton@lbl.gov"

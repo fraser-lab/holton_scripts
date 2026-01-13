@@ -1,6 +1,6 @@
 #! /bin/tcsh -f
 #
-#        measure XDS data processing performance on current system
+#        measure XDS data processing performance on current system          -James Holton 11-27-18
 #
 #        download test data if its not already here
 #        download XDS if its not already here
@@ -16,11 +16,11 @@
 #
 
 set dlurl = http://smb.slac.stanford.edu/~holton/xds_bench/
-set dlurl = http://bl831.als.lbl.gov/~jamesh/benchmarks/xds/
+set dlurl = https://bl831.als.lbl.gov/~jamesh/benchmarks/xds/
 
 # probe machine for defaults
 set uname = `uname`
-set test = `uname -a | egrep "86_64" | wc -l`
+set test = `uname -a | egrep "86_64|ARM64_" | wc -l`
 if("$test" != "1") then
     set BAD = "XDS only runs on 64-bit machines.  Sorry."
     goto exit
@@ -176,7 +176,7 @@ if ("$test" != "1") then
     set prefix = XDS-INTEL64_Linux_x86_64
     if($uname == Darwin) set prefix = XDS-OSX_64
     if(! -e ${prefix}.tar.gz) then
-        wget ftp://ftp.mpimf-heidelberg.mpg.de/pub/kabsch/${prefix}.tar.gz
+        wget https://xds.mr.mpg.de/${prefix}.tar.gz
     endif
     tar xzvf ${prefix}.tar.gz 
     set path = ( `pwd`/$prefix $path )
@@ -209,14 +209,26 @@ if($images != 360) then
     goto exit
 endif
 
-set test = `md5sum data/core_001.cbf | awk '{print ($1 == "6dc7547f81cf7ada0b69db3e91cd0792")}'`
-if("$test" == "") set test = `sum data/core_001.cbf | awk '{print ($1 == "29901")}'`
-if("$test" != "1") then
+# see if image is binary identical to expectations
+set test = `md5sum data/core_001.cbf | awk '{print ($1 == "6dc7547f81cf7ada0b69db3e91cd0792" )}'`
+if("$test" != "1") set test = `sum data/core_001.cbf | awk '{print ($1 == "29901" || $1 == "36476" || $1 == "28925" || $1 == "53125")}'`
+if("$test" != "1" && ! $?MD5CHECKED) then
+        md5sum data/core_001.cbf
+        sum data/core_001.cbf
         set BAD = "data/core_001.cbf does not match expected MD5 sum. corrupted?"
+        echo "WARNING: $BAD"
+        echo "continue anyway? [Yn]"
+        set test = "no"
+        # ignore if output is not a terminal
+        test -t 1
+        if(! $status) then
+            set test = ( $< )
+        endif
+        if( "$test" !~ n*) goto skip_md5
         goto exit
     endif
 endif
-
+skip_md5:
 
 if (! -x ./log_timestamp.tcl) then
     cat << EOF >! log_timestamp.tcl
@@ -296,7 +308,7 @@ X-RAY_WAVELENGTH= 1
 INCLUDE_RESOLUTION_RANGE=50 0
 TRUSTED_REGION=0.0 1.99
 VALUE_RANGE_FOR_TRUSTED_DETECTOR_PIXELS=6000. 30000.
-STRONG_PIXEL=4
+SIGNAL_PIXEL=4
 MINIMUM_NUMBER_OF_PIXELS_IN_A_SPOT=3
 NX= 2463 NY= 2527 QX= 0.172 QY= 0.172
 SENSOR_THICKNESS= 0.001
@@ -513,7 +525,7 @@ echo "GOTHERE: $test   $stage $pset_njobs $pset_nprocs $pset_imgcache $DELPHI"
    # now extract run time
    set runtime = "n/d"
    if(-s ${stage}.log)    set runtime = `tail -n 1 ${stage}.log | awk '{print $8}'`
-   if("$runtime"  == ""  && -s ${stage}.LP) set runtime = `awk '/wall-clock/' ${stage}.LP | awk '$4+0>0{print $4} $5+0>0{print $5}' | sort -g | tail -n 1`
+   if("$runtime"  == ""  && -s ${stage}.LP) set runtime = `awk '/wall-clock/' ${stage}.LP | awk '$4+0>0{print $4} $5+0>0{print $5} $7+0>0{print $7}' | sort -g | tail -n 1`
    if("$runtime" == "") set runtime = "n/d"
    if("$stage" == "XYCORR"    && ! -s X-CORRECTIONS.cbf) set runtime = "n/d"
    if("$stage" == "INIT"      && ! -s GAIN.cbf)          set runtime  = "n/d"
@@ -570,7 +582,7 @@ endif
 echo "sending results..."
 set sanskrit = `gzip -c results.txt | base64 | awk '{gsub("/","_");gsub("[+]","-");printf("%s",$0)}'`
 if("$sanskrit" != "") then
-    curl http://bl831.als.lbl.gov/xds_bench$sanskrit > /dev/null
+    curl https://bl831.als.lbl.gov/xds_bench$sanskrit > /dev/null
 endif
 if($status || "$sanskrit" == "") then
     echo "ERROR: please send file results.txt manually to JMHolton@lbl.gov"
