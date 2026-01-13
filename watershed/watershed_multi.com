@@ -13,8 +13,10 @@ foreach arg ( $* )
     if("$arg" =~ CPUs=*) set CPUs = `echo $arg | awk -F "=" '{print $2+0}'`
 end
 
+set thisdir = `dirname $0`
+
 set noglob
-set checkpointdir = /dev/shm/${USER}
+set checkpointdir = /dev/shm/${USER}/checkpoint/
 if(! $?CLUSTER) set CLUSTER
 if($CLUSTER == "PBS") set checkpointdir = tempfiles/*/watershed_*/
 if($CLUSTER == "SGE") set checkpointdir = /scrapp2/jamesh/*/watershed_*/
@@ -40,6 +42,7 @@ echo "clearing last run"
 rm -rf minus_[0-9]*/
 rm -rf logs
 rm -rf $checkpointdir
+mkdir -p $checkpointdir
 mkdir -p logs
 echo "job launch"
 if("$CLUSTER" == "") goto local
@@ -48,12 +51,18 @@ if("$CLUSTER" == "PBS") then
         set pbsCPUs = "%$CPUs"
     endif
 #    qsub -e logs/errors.log -o logs/run.log -d $pwd -t 0-${waters}%100 ./watershed_cpu.com -F "newstart.pdb $mtzfile" 
-    qsub -e logs/errors.log -o logs/run.log -d $pwd -t 0-${waters}$pbsCPUs ./watershed_cpu.com -F "newstart.pdb $mtzfile" 
+    qsub -e logs/errors.log -o logs/run.log -d $pwd -t 0-${waters}$pbsCPUs ${thisdir}/watershed_cpu.com -F "newstart.pdb $mtzfile" 
 endif
 if("$CLUSTER" == "SGE") then
     @ plusone = ( $waters + 1 )
 #    qsub -cwd -t 1-$plusone -j yes -masterq long.q -o logs/run.log.\$TASK_ID -l h_rt=336:00:00 ./watershed_cpu.com newstart.pdb $mtzfile
-    qsub -cwd -t 1-$plusone -j yes -masterq lab.q -o logs/run.log.\$TASK_ID -l h_rt=10:00:00 ./watershed_cpu.com newstart.pdb $mtzfile
+    qsub -cwd -t 1-$plusone -j yes -masterq lab.q -o logs/run.log.\$TASK_ID -l h_rt=10:00:00 ${thisdir}/watershed_cpu.com newstart.pdb $mtzfile
+endif
+if("$CLUSTER" == "SLURM") then
+    @ plusone = ( $waters + 1 )
+
+    @ water = ( $water + 1 )
+    srun ${thisdir}/watershed_cpu.com newstart.pdb $mtzfile $water >&! logs/job_${water}.log &
 endif
 
 sleep 10
@@ -89,7 +98,7 @@ set lastjobs = 0
 mkdir -p logs
 while ( $water <= $waters )
     @ water = ( $water + 1 )
-    ./watershed_cpu.com newstart.pdb $mtzfile $water >&! logs/job_${water}.log &
+    ${thisdir}/watershed_cpu.com newstart.pdb $mtzfile $water >&! logs/job_${water}.log &
 
     # now make sure we dont overload the box
     @ jobs = ( $jobs + 1 )
@@ -253,7 +262,7 @@ while ( $water <= $waters )
     
     echo -n "$num " | tee -a qsubs.log
     mkdir -p minus_${num}/
-    qsub -e minus_${num}/errors.log -o minus_${num}/run.log -d $pwd ./watershed_cpu.com -F "newstart.pdb $mtzfile $num" >> qsubs.log
+    qsub -e minus_${num}/errors.log -o minus_${num}/run.log -d $pwd ${thisdir}/watershed_cpu.com -F "newstart.pdb $mtzfile $num" >> qsubs.log
     sleep 2
 end
 

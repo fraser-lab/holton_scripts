@@ -71,7 +71,7 @@ foreach location ( /scrapp /scrapp2 /global/scratch /scratch /tmp /dev/shm )
     if(! -w ${location}/${USER}) continue
     set test = `df -k ${location}/${USER} | tail -n 1 | awk -v mingigs=$mingigs 'NF>5{print ($(NF-2)*1024>mingigs*1e9)}'`
     if("$test" != "1") continue
-    set tempdir = ${location}/$USER
+    set tempdir = ${location}/${USER}/checkpoint/
 end
 mkdir -p $tempdir
 # pick a temp file location we can see from everywhere
@@ -86,7 +86,7 @@ foreach location ( `dirname $tempdir` /scrapp /scrapp2 /global/scratch )
     if(! -w ${location}/${USER}) continue
     set test = `df -k ${location}/${USER} | tail -n 1 | awk -v mingigs=$mingigs 'NF>5{print ($(NF-2)*1024>mingigs*1e9)}'`
     if("$test" != "1") continue
-    set sharedtmp = ${location}/${USER}
+    set sharedtmp = ${location}/${USER}/checkpoint/
 end
 if($?CLUSTER) set sharedtmp = ${sharedtmp}/${HOST}
 mkdir -p $sharedtmp
