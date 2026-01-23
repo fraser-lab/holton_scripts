@@ -1,23 +1,29 @@
 #! /bin/tcsh -f
 #    
-#    auto-converging refmac5 script        -James Holton     3-19-18
+#    auto-converging refmac5 script        -James Holton     11-29-23
 #
 set pdbin = starthere.pdb
 set mtzfile = ./refme.mtz
-set libfile = ""
+set libfiles = ""
 set tempfile = tempfile
 set refmac5 = refmac5
 
 set CONVERGE
 set SALVAGE_LAST
 set damp = 0.5
+set Bdamp = 0.5
+set occdamp = 0.5
 set NCYC = 5
 set min_shift = 0.01
 set min_Oshift = 0
 set min_Bshift = 1
 set max_trials = 10000
 set max_diverge = 50
+set max_minus   = 9
+set max_runtime = 0
 set user_scale = ""
+set xray_weight = ""
+set weight_matrix = 0.5
 rm -f ${tempfile}shifts
 
 # parameters for damping the PDB manually
@@ -36,7 +42,8 @@ set lonudge = 4
 foreach arg ( $* )
     if("$arg" =~ *.pdb) set pdbin = "$arg"
     if("$arg" =~ *.mtz) set mtzfile = "$arg"
-    if("$arg" =~ *.cif) set libfile = "$arg"
+    if("$arg" =~ *.cif) set libfiles = ( $libfiles "$arg" )
+    if("$arg" =~ *.lib) set libfiles = ( $libfiles "$arg" )
     if(-x "$arg") then
         set test = `echo | $arg |& awk '/REFMAC/{print 1}'`
         if("$test" == "1") then
@@ -50,11 +57,16 @@ foreach arg ( $* )
     if("$arg" =~ nosalvage*) unset SALVAGE_LAST
     if("$arg" =~ append*) set APPEND
     if("$arg" =~ noappend*) unset APPEND
+    if("$arg" =~ dofft*) set DOFFT
+    if("$arg" =~ nofft*) unset DOFFT
     if("$arg" =~ converge_scale*) set CONVERGE_SCALE
     if("$arg" =~ F000*) set find_F000
+    if("$arg" =~ anomalous*) set ANOM
+    if("$arg" =~ noanomalous*) unset ANOM
     if("$arg" =~ prune_bad*) then
         set PRUNE_BADDIES = `echo $arg | awk -F "=" '{print $NF+0}'`
     endif
+    if("$arg" =~ keep_zero*) set KEEP_ZEROOCC
     if("$arg" =~ nudge_occ*) then
         set NUDGE_OCC
         set user_nudge = `echo $arg | awk -F "=" '{print $NF+0}'`
@@ -68,13 +80,18 @@ foreach arg ( $* )
        set highB = `echo $arg | awk -F "=" '{print $NF+0}'`
        if("$highB" == "0") set highB = 499
     endif
+    if("$arg" =~ prune_lowocc*) then
+       set PRUNE_LOWOCC
+       set lowocc = `echo $arg | awk -F "=" '{print $NF+0}'`
+       if("$lowocc" == "0") set lowocc = 0.009
+    endif
     if("$arg" =~ maxdXYZ=*) set maxdXYZ = "$arg"
     if("$arg" =~ maxdocc=*) set maxdocc = "$arg"
     if("$arg" =~ maxdB=*)   set maxdB   = "$arg"
     if("$arg" =~ minB=*)    set user_minB   = `echo $arg | awk -F "=" '{print $2+0}'`
     if("$arg" =~ maxB=*)    set user_maxB   = `echo $arg | awk -F "=" '{print $2+0}'`
     set int = `echo $arg | awk '{print int($1)}'`
-    if("$arg" == "$int") set NCYC = $int
+    if("$arg" == "$int") set user_NCYC = $int
     set test = `echo $arg | awk '/A$/ && $1+0>0{print $1+0}'`
     if("$test" != "") set min_shift = $test
     set test = `echo $arg | awk '/O$/ && $1+0>0{print $1+0}'`
@@ -85,22 +102,96 @@ foreach arg ( $* )
     if("$test" != "") set user_scale = $test
     set test = `echo $arg | awk '/^trials=/{print substr($1,index($1,"=")+1)+0}'`
     if("$test" != "") set max_trials = $test
+    set test = `echo $arg | awk '/^runtime=/{print substr($1,index($1,"=")+1)+0}'`
+    if("$test" != "") set max_runtime = $test
     set test = `echo $arg | awk '/^diverge=/{print substr($1,index($1,"=")+1)+0}'`
     if("$test" != "") set max_diverge = $test
-    set test = `echo $arg | awk '/^ncyc=/{print substr($1,index($1,"=")+1)+0}'`
-    if("$test" != "") set NCYC = $test
+    set key = `echo $arg | awk -F "=" '{print $1}'`
+    set val = `echo $arg | awk -F "=" '{print $2}'`
+    if("$key" == "NCYC") set user_NCYC = $val
+    if("$key" == "min_shift") set min_shift = $val
+    if("$key" == "min_Oshift") set min_Oshift = $val
+    if("$key" == "min_Bshift") set min_Bshift = $val
+    if("$key" == "max_trials") set max_trials = $val
+    if("$key" == "max_minus") set max_minus = $val
+    if("$key" == "max_runtime") set max_runtime = $val
+    if("$key" == "max_diverge") set max_diverge = $val
+    if("$key" == "user_scale") set user_scale = $val
+    if("$key" == "xray_weight") set xray_weight = $val
+    if("$key" == "weight_matrix") set weight_matrix = $val
+    if("$key" == "hinudge") set hinudge = $val
+    if("$key" == "lonudge") set lonudge = $val
+    if("$key" == "damp") set damp = $val
+    if("$key" == "Bdamp") set Bdamp = $val
+    if("$key" == "occdamp") set ocdamp = $val
+    if("$key" == "tempfile") set tempfile = $val
 end
+
+if( $?user_NCYC ) then
+    set NCYC = $user_NCYC
+endif
+if ("$maxdXYZ" != "" || "$maxdocc" != "" || "$maxdB" != "") set user_NCYC
 
 set test = `echo "one\ntwo" | tac |& awk 'NR==1 && /two/{print "1"}'`
 if("$test" != "1") then
     alias tac "awk '{line[++n]="'$0'"} END{for(;n>0;--n) print line[n]}'"
 endif
 
+if(-w /dev/shm) then
+    setenv CCP4_SCR /dev/shm/${USER}/refmac$$_/
+    set CLEANUP_CCP4_SCR
+    if("$tempfile" == "shm") set tempfile = ${CCP4_SCR}/tempfile
+endif
+if(! -e "$CCP4_SCR") mkdir -p $CCP4_SCR
+
+# see if we are alone here?
+set pwd = `pwd`
+set mypid = $$
+foreach retry ( 1 2 3 )
+  set pids = `ps -fu $USER | tee debug1.log | egrep converge_refmac.com | egrep -v " egrep -v | grep -E |^UID" | awk -v pid=$mypid '$2!=pid && ! ( / srun / && / converge_refmac.com/ ) {print "/proc/"$2"/cwd"}'`
+
+  set otherpid = `ls -l $pids |& tee debug2.log | awk -v pwd="$pwd" '$NF==pwd{print}' | awk -F "/" '{print $3}'`
+  if( "$otherpid" == "") break
+
+  set sleepids = `awk '/sleep/{print $2}' debug1.log`
+  if( "$sleepids" != "" ) then
+    echo "kill sleep at $sleepids ? "
+#    kill $sleepids >& /dev/null
+    sleep `echo $$ | awk '{srand($1);print 0.1+rand()}'`
+  endif
+end
+if( "$otherpid" != "" ) then
+    ps -flea | grep $otherpid
+    set BAD = "other job running here: $otherpid , we are $mypid "
+    goto exit
+endif
+rm -f debug1.log debug2.log
+
+
+if( "$max_runtime" != "0" ) then
+    rm -f refmac_stop.txt >& /dev/null
+    ( sleep $max_runtime >& /dev/null ; ( echo "stop Y" >! refmac_stop.txt ) ; ( echo "stop Y" >! refmac_stop.txt ) ) &
+    ps -fH --ppid=$!
+    set sleep_pid = `ps --ppid=$! | awk '$NF=="sleep"{print $1}'`
+    echo "sleep_pid = $sleep_pid "
+#    ps -f $sleep_pid
+endif
+
+# don't let damp_pdb.com trigger prepature exit
+echo $maxdXYZ $min_shift |\
+ awk '{s=sprintf("%.3f",$1/2)+0;m=$2} \
+    s<0.002{s=0.002}\
+    NF!=2{print ; exit} \
+    m>s{m=s}\
+    {print m}' >! ${tempfile}
+set min_shift = `cat ${tempfile}`
+rm -f ${tempfile}
+
 
 #get variables from mtz file
 echo "go" | mtzdump hklin $mtzfile |\
 awk '/OVERALL FILE STATISTICS/,/No. of reflections used/' |\
-awk 'NF>10 && $(NF-1) ~ /[FJQPWADI]/' |\
+awk 'NF>8 && $(NF-1) ~ /[FJQPWADI]/' |\
 cat >! ${tempfile}mtzdmp
 
 # use completeness, or F/sigF to pick default F
@@ -159,7 +250,7 @@ endif
 
 
 
-if("$F" == "") then
+if("$F" == "" || $?ANOM ) then
 
     #get variables from mtz file
     echo "go" | mtzdump hklin $mtzfile |\
@@ -247,13 +338,45 @@ if(! $?APPEND) then
 endif
 cp -p $pdbin last_refmac.pdb
 
+
+if(-e refmac_opts.txt) then
+    set test = `awk 'toupper($1) ~ /^#LIBIN/{print $2}' refmac_opts.txt`
+    set libfiles = ( $libfiles $test )
+endif
+set libfile
+set LIBSTUFF
+echo -n "" >! ${tempfile}.lib 
+foreach libfile ( $libfiles )
+    libcheck << EOF
+_N
+_nodist
+_FILE_L ${tempfile}.lib
+_FILE_L2 $libfile
+_FILE_O ${tempfile}new
+_END
+EOF
+    mv ${tempfile}new.lib ${tempfile}.lib
+    set libfile = ${tempfile}.lib
+end
+if(-s "$libfile") set LIBSTUFF = "LIBIN $libfile"
+if(-e atomsf.lib) set LIBSTUFF = "$LIBSTUFF ATOMSF ./atomsf.lib"
+if($?find_F000) then
+    set LIBSTUFF = "$LIBSTUFF MSKOUT ${tempfile}rawmask.map"
+    set extraopts = "MAKE HOUT Y"
+endif
+
+set killopts
+if( "$max_runtime" != "0" ) set killopts = "kill refmac_stop.txt"
+
 resume:
 set moving = 1
 set last_time = 0
 while ($moving && $trials_since_start < $max_trials || $last_time)
 
+    #echo "DEBUG moving= $moving tss= $trials_since_start mt= $max_trials lt= $last_time"
+
     set FP = "FP=$F"
-    if($#F > 1) set FP = "$F"
+    if($#F > 1 || "$F" =~ *" "*) set FP = "$F"
     set SIGFP
     if("$SIGF" != "") set SIGFP = "SIGFP=$SIGF"
     if("$F" == "") set FP = ""
@@ -264,23 +387,34 @@ while ($moving && $trials_since_start < $max_trials || $last_time)
     endif
     set LABIN = "LABIN $FP $SIGFP $Fparts $FREE $HL"
 
-    set DAMP = "DAMP $damp $damp"
+    set DAMP = "DAMP $damp $Bdamp $occdamp"
+
+    set WEIGHT = "weight matrix $weight_matrix"
+    if( "$weight_matrix" == "" ) set WEIGHT = ""
 
     set otheropts
-    set extraopts
+    if(! $?extraopts) set extraopts
     if(-e refmac_opts.txt) then
         set otheropts = "@refmac_opts.txt"
         set test = `awk 'toupper($1) ~ /^LABI/{print}' refmac_opts.txt | wc -l`
         if("$test" != "0") set LABIN = ""
         set test = `awk 'toupper($1) ~ /^DAMP/{print}' refmac_opts.txt | wc -l`
-        if("$test" != "0") set DAMP = ""
-    endif
-    set LIBSTUFF
-    if(-e "$libfile") set LIBSTUFF = "LIBIN $libfile"
-    if(-e atomsf.lib) set LIBSTUFF = "$LIBSTUFF ATOMSF ./atomsf.lib"
-    if($?find_F000) then
-        set LIBSTUFF = "$LIBSTUFF MSKOUT ${tempfile}rawmask.map"
-        set extraopts = "MAKE HOUT Y"
+        if("$test" != "0") then
+            set DAMP = ""
+            set trials_since_damp = 0
+        endif
+        set test = `awk 'toupper($1) ~ /^NCYC/{print $NF}' refmac_opts.txt`
+        if("$test" != "") set NCYC = "$test" 
+        set test = `awk 'toupper($1) ~ /^WEIGH/ && toupper($2) ~ /^MAT/ {print $NF}' refmac_opts.txt`
+        if("$test" != "") then
+           set weight_matrix = "$test"
+           set WEIGHT = ""
+        endif
+        set test = `awk 'toupper($1) ~ /^WEIGH/ && toupper($2) !~ /^MAT/ {print}' refmac_opts.txt`
+        if("$test" != "") then
+           # user supplied weight keyword rules
+           set WEIGHT = ""
+        endif
     endif
 
     $refmac5 HKLIN $mtzfile HKLOUT ./refmacout.mtz $LIBSTUFF \
@@ -290,28 +424,55 @@ $SCPART
 $otheropts
 $extraopts
 $DAMP
+$WEIGHT
 NCYC $NCYC
+$killopts
 EOF-refmac
-
-    if($status || ! -e refmacout.pdb) then
+    set refmac_status = $status
+    # detect when exit was requested by signal file
+    set test = `tail -n 30 ${tempfile}.log | egrep "Program terminated by user" | wc -l`
+    if( $test && "$max_runtime" != "0" && -e refmac_stop.txt ) then
+        echo "ran out of time..."
+        rm -f refmac_stop.txt
+        set last_time = 1
+        set refmac_status = 0
+        goto exit
+    endif
+    if($refmac_status || ! -e refmacout.pdb) then
         set BAD = "refmac failed ( $status ) ."
         goto exit
     endif
+    
+    if(-e ./checkpoint/) then
+        # copy latest result to the checkpoint output
+        cp -p refmacout.pdb refmacout.mtz refmac_*.txt refmac_*.log ./checkpoint/
+    endif
 
-    set n = `tail -1 refmac_scales.log |& awk '{print $1+1}'`
+    set n = `tail -1 refmac_scales.log |& awk 'END{print $1+1}'`
 
     # extract twin statistics
-    tac ${tempfile}.log |\
-    awk '/ Cycle / && stats!=""{print stats,funk+0;exit}\
+    tac ${tempfile}.log |&\
+    awk '/ Cycle / && stats!="" && vdw!=""{++p;print stats,funk+0,vdw;exit}\
          /function value/{funk=$NF}\
-         $1==5{$2*=100;$3*=100;$1="";stats=$0}' >! ${tempfile}stats.txt
+         /VDW repulsions: refined_atoms/{vdw=$5}\
+         / Final results /{++f} f && $1~/^[\044][\044]$/{getline;\
+         $2*=100;$3*=100;$1="";stats=$0;f=0}\
+        END{if(! p) print stats,funk+0,vdw}' >! ${tempfile}stats.txt
     set stats = `cat ${tempfile}stats.txt`
-    tac ${tempfile}.log |\
+    # 
+    tac ${tempfile}.log |&\
     awk '/^Twin fractions /{print $4,$5,$6,$7,$8,$9,$10,$11,$12,$13;exit}' |\
     cat >! ${tempfile}twinstats.txt
     set twinstats = `cat ${tempfile}twinstats.txt`
-    echo "$n $stats $twinstats " | tee -a refmac_Rplot.txt
+    echo "$n $stats $twinstats "
+    touch refmac_Rplot.txt
+    echo "$n $stats $twinstats " >> refmac_Rplot.txt
+    # n Rwork Rfree FOM LL LLfree rmsBond Zbond rmsAngle Zangle rmsChiral "function value" vdw
+    # 1 2     3      4  5   6        7     8       9     10        11        12             13
     rm -f ${tempfile}stats.txt ${tempfile}twinstats.txt
+
+    # trial Rw Rf FOM LL LLf rmsBond Zbond rmsAngle zAngle rmsChiral function vdw
+    #   1   2  3  4   5  6   7       8     9        10     11         12       13
 
     if($#stats > 3) then
         set R = $stats[1]
@@ -326,28 +487,33 @@ EOF-refmac
         endif
         if(! $?minR) set minR = $R
         if(! $?minRfree) set minRfree = $Rfree
-        set test = `echo $R $minR | awk '{print ($1<$2)}'`
+        set test = `echo $R $minR | awk '{print ($1<=$2)}'`
         if($test) then
             set minR = $R
             set minR_n = $n
             cp -p refmacout.pdb refmacout_minR.pdb
+            cp -p refmacout.mtz refmacout_minR.mtz
+            cp -p ${tempfile}.log refmacout_minR.log
         endif
-        set test = `echo $Rfree $minRfree | awk '{print ($1<$2)}'`
+        set test = `echo $Rfree $minRfree | awk '{print ($1<=$2)}'`
         if($test) then
             set minRfree = $Rfree
             set minRfree_n = $n
             cp -p refmacout.pdb refmacout_minRfree.pdb
+            cp -p refmacout.mtz refmacout_minRfree.mtz
+            cp -p ${tempfile}.log refmacout_minRfree.log
         endif
     endif
 
     # get refined partial structure /solvent scale factors
-    tac ${tempfile}.log |\
-    awk '/Cycle/ && s0 != ""{print s0,B0,s1,B1,s2,B2,s3,B3;exit}\
-         /function value/{funk=$NF}\
+    tac ${tempfile}.log |&\
+    awk 's0 != ""{print s0,B0,s1,B1,s2,B2,s3,B3,s4,B4,s5,B5;exit}\
          /Overall               : scale = /{s0=$5;B0=$NF}\
          /Partial structure    1: scale = /{s1=$6;B1=$NF}\
          /Partial structure    2: scale = /{s2=$6;B2=$NF}\
-         /Partial structure    3: scale = /{s3=$6;B3=$NF}' |\
+         /Partial structure    3: scale = /{s3=$6;B3=$NF}\
+         /Partial structure    4: scale = /{s4=$6;B4=$NF}\
+         /Partial structure    5: scale = /{s5=$6;B5=$NF}' |\
     cat >! ${tempfile}scales.txt
     set scales = `cat ${tempfile}scales.txt`
     echo "$n $scales " | tee -a refmac_scales.log
@@ -435,9 +601,61 @@ EOF-refmac
         set opts = ( $maxdXYZ $maxdocc $maxdB )
         if("$user_minB" != "") set opts = ( $opts minB=$user_maxB )
         if("$user_maxB" != "") set opts = ( $opts maxB=$user_maxB )
-        damp_pdb.com last_refmac.pdb refmacout.pdb $opts
+echo "DEBUG: $opts"
+        damp_pdb.com last_refmac.pdb refmacout.pdb $opts |& tee ${tempfile}_dampdb.log
         mv refmacout.pdb undamped.pdb
         mv new.pdb refmacout.pdb
+rmsd last_refmac.pdb refmacout.pdb
+
+        set scale_XYZ = `awk '/^scale_XYZ/{print $3}' ${tempfile}_dampdb.log`
+        set scale_B = `awk '/^scale_B/{print $3}' ${tempfile}_dampdb.log`
+        set scale_occ = `awk '/^scale_occ/{print $3}' ${tempfile}_dampdb.log`
+        rm -f ${tempfile}_dampdb.log
+    endif
+    if( "$maxdXYZ" != "" && "$maxdXYZ" !~ *=0 ) then
+        # adjust damping appropriately
+        set test = `echo $scale_XYZ | awk '{print ( $1 < 0.5 )}'`
+        if( $test ) then
+          set damp = `echo $damp $damp_step | awk '{print $1 * $2}'`
+          echo "significant scale-back this time, damping shifts by $damp_step"
+          set trials_since_damp = 0
+        endif
+        set test = `echo $scale_XYZ | awk '{print ( $1 > 0.99 )}'`
+        if( $test ) then
+          echo "scale-back was not needed, loosening the damping factor by $undamp_step ..."
+          set damp = `echo $damp $undamp_step | awk '{print $1*(1+$2)}' | awk '$1>0.5{$1=0.5} {print}'`
+          set trials_since_damp = 0
+        endif
+    endif
+    if( "$maxdB" != "" && "$maxdB" !~ *=0 ) then
+        # adjust B damping appropriately
+        set test = `echo $scale_B | awk '{print ( $1 < 0.5 )}'`
+        if( $test ) then
+          set Bdamp = `echo $Bdamp $damp_step | awk '{print $1 * $2}'`
+          echo "significant B scale-back this time, damping shifts by $damp_step"
+          set trials_since_damp = 0
+        endif
+        set test = `echo $scale_B | awk '{print ( $1 > 0.99 )}'`
+        if( $test ) then
+          echo "B scale-back was not needed, loosening the damping factor by $undamp_step ..."
+          set Bdamp = `echo $Bdamp $undamp_step | awk '{print $1*(1+$2)}' | awk '$1>0.5{$1=0.5} {print}'`
+          set trials_since_damp = 0
+        endif
+    endif
+    if( "$maxdocc" != ""  && "$maxdocc" !~ *=0 ) then
+        # adjust occ damping appropriately
+        set test = `echo $scale_occ | awk '{print ( $1 < 0.5 )}'`
+        if( $test ) then
+          set occdamp = `echo $occdamp $damp_step | awk '{print $1 * $2}'`
+          echo "significant occ scale-back this time, damping shifts by $damp_step"
+          set trials_since_damp = 0
+        endif
+        set test = `echo $scale_occ | awk '{print ( $1 > 0.99 )}'`
+        if( $test ) then
+          echo "occ scale-back was not needed, loosening the damping factor by $undamp_step ..."
+          set occdamp = `echo $occdamp $undamp_step | awk '{print $1*(1+$2)}' | awk '$1>0.5{$1=0.5} {print}'`
+          set trials_since_damp = 0
+        endif
     endif
 
     cat last_refmac.pdb |\
@@ -455,8 +673,8 @@ EOF-refmac
     cat >! ${tempfile}ms_shifts.txt
     set shift = `awk '{++n;sum+=$1} END{if(n) printf "%.3f", sqrt(sum/n)}' ${tempfile}ms_shifts.txt`
     # take maximum shift
-    set shift = `sort -gr ${tempfile}ms_shifts.txt | awk '{print sqrt($1);exit}'`
-    set shift_atom = `sort -gr ${tempfile}ms_shifts.txt | awk -F "|" '{print $2;exit}'`
+    set shift = `sort -gr ${tempfile}ms_shifts.txt |& awk '{print sqrt($1);exit}'`
+    set shift_atom = `sort -gr ${tempfile}ms_shifts.txt |& awk -F "|" '{print $2;exit}'`
     rm -f ${tempfile}before.xyz ${tempfile}after.xyz ${tempfile}ms_shifts.txt >& /dev/null
 
 
@@ -473,8 +691,8 @@ EOF-refmac
     cat >! ${tempfile}ms_o.txt
     set oshift = `awk '{++n;sum+=$1} END{if(n) printf "%.3f", sqrt(sum/n)}' ${tempfile}ms_o.txt`
     # take maximum shift
-    set oshift = `sort -gr ${tempfile}ms_o.txt | awk '{print sqrt($1);exit}'`
-    set oshift_atom = `sort -gr ${tempfile}ms_o.txt | awk -F "|" '{print $2;exit}'`
+    set oshift = `sort -gr ${tempfile}ms_o.txt |& awk '{print sqrt($1);exit}'`
+    set oshift_atom = `sort -gr ${tempfile}ms_o.txt |& awk -F "|" '{print $2;exit}'`
     rm -f ${tempfile}before.o ${tempfile}after.o ${tempfile}ms_o.txt >& /dev/null
 
 
@@ -491,13 +709,14 @@ EOF-refmac
     cat >! ${tempfile}ms_B.txt
     set Bshift = `awk '{++n;sum+=$1} END{if(n) printf "%.3f", sqrt(sum/n)}' ${tempfile}ms_B.txt`
     # take maximum shift
-    set Bshift = `sort -gr ${tempfile}ms_B.txt | awk '{print sqrt($1);exit}'`
-    set Bshift_atom = `sort -gr ${tempfile}ms_B.txt | awk -F "|" '{print $2;exit}'`
+    set Bshift = `sort -gr ${tempfile}ms_B.txt |& awk '{print sqrt($1);exit}'`
+    set Bshift_atom = `sort -gr ${tempfile}ms_B.txt |& awk -F "|" '{print $2;exit}'`
     rm -f ${tempfile}before.B ${tempfile}after.B ${tempfile}ms_B.txt >& /dev/null
 
-
+    touch refmac_shifts.txt
     echo "moved $shift A  $oshift occ $Bshift B (waiting for $min_shift $min_Oshift $min_Bshift )   $shift_atom   $oshift_atom   $Bshift_atom" |\
-      tee -a refmac_shifts.txt
+      cat >> refmac_shifts.txt
+    tail -1 refmac_shifts.txt
     tail -10 refmac_shifts.txt |\
     awk '{++n;v[n]=$2;sum+=$2;ssqr=$2*$2}\
       END{avg=sum/n;sum=0;for(i=1;i<=n;++i)sum+=(v[i]-avg)^2;\
@@ -524,53 +743,77 @@ EOF-refmac
             set undamp_step = `echo $undamp_step 0.5 | awk '{print $1*$2}'`
             echo "reducing un-damp step to $undamp_step"
         endif
-        set damp = `echo $damp $damp_step | awk '{print $1 * $2}'`
-        echo "convergence taking too long, damping shifts by $damp_step"
+        set xmoving = `echo "$shift $min_shift"   | awk '{print ( $1+0>$2+0 )}'`
+        set Bmoving = `echo "$Bshift $min_Bshift" | awk '{print ( $1+0>$2+0 )}'`
+        set omoving = `echo "$oshift $min_Oshift" | awk '{print ( $1+0>$2+0 )}'`
+        if( $xmoving ) then
+            set damp = `echo $damp $damp_step | awk '{print $1 * $2}'`
+            echo "convergence taking too long, increasing damping by $damp_step"
+        endif
+        if( $Bmoving ) then
+            set Bdamp = `echo $Bdamp $damp_step | awk '{print $1 * $2}'`
+            echo "convergence taking too long, increasing B damping by $damp_step"
+        endif
+        if( $omoving ) then
+            set occdamp = `echo $occdamp $damp_step | awk '{print $1 * $2}'`
+            echo "convergence taking too long, increasing occ damping by $damp_step"
+        endif
+        if(! $?user_NCYC  ) then
+            set NCYC = `echo $NCYC 2 50 | awk '{ncyc=$1*$2} ncyc>$3{ncyc=$3} {print ncyc}'`
+            echo "convergence taking too long, increasing ncyc to $NCYC"
+        endif
     endif
 #    if($trials > 5000) then
 #        set min_shift = `echo $min_shift | awk '{print $1*1.1}'`
 #    endif
     set moving = `echo "$shift $oshift $Bshift $min_shift $min_Oshift $min_Bshift" | awk '{print ($1+0>$4+0 || $2+0>$5+0 || $3+0>$6+0)}'`
-    echo "checking $shift $oshift $Bshift > $min_shift ($moving) "
+    echo "checking $shift $oshift $Bshift > $min_shift $min_Oshift $min_Bshift ($moving) "
 
-    foreach m ( `seq 9 -1 1` )
-        @ o = ( $m - 1 )
+    set w = `echo $max_minus | awk '{print length($1)}'`
+    foreach m ( `seq -f%0${w}.0f $max_minus -1 1` )
+        set o = `echo $m $w | awk '{printf("%0"$2"d",$1-1)}'`
         if(-e minus${o}_refmac.pdb) cp -p minus${o}_refmac.pdb minus${m}_refmac.pdb
     end
-    cp -p last_refmac.pdb minus1_refmac.pdb
+    cp -p last_refmac.pdb minus${m}_refmac.pdb
     cp -p last_refmac.pdb last_last_refmac.pdb
     cp -p refmacout.pdb last_refmac.pdb
     set pdbin = last_refmac.pdb
 
-    cat refmacout.pdb |\
-    awk '{id=substr($0,12,15)} \
-        /^ATOM|^HETAT/ && substr($0,55,6)+0==0{++bad[id]}\
-      ! bad[id]{print}' |\
-    cat >! nonzero.pdb
-    cat refmacout.pdb |\
-    awk '{id=substr($0,12,15)} \
-        /^ATOM|^HETAT/ && substr($0,55,6)+0==0{++bad[id]}\
-      bad[id]{print}' |\
-    tee -a refined_to_zero.pdb
-    set pdbin = nonzero.pdb
+    if($?KEEP_ZEROOCC) then
+        echo "keeping zero-occupancy atoms for next time."
+    else
+        cat refmacout.pdb |\
+        awk '{id=substr($0,12,15)} \
+            /^ATOM|^HETAT/ && substr($0,55,6)+0==0{++bad[id]}\
+          ! bad[id]{print}' |\
+        cat >! nonzero.pdb
+        cat refmacout.pdb |\
+        awk '{id=substr($0,12,15)} \
+            /^ATOM|^HETAT/ && substr($0,55,6)+0==0{++bad[id]}\
+          bad[id]{print}' |\
+        tee -a refined_to_zero.pdb
+        set pdbin = nonzero.pdb
 
-    set output_atoms = `egrep "^ATOM|^HETAT" refmacout.pdb | wc -l`
-    set nonzero_atoms = `egrep "^ATOM|^HETAT" nonzero.pdb | wc -l`
-    if("$output_atoms" != "$nonzero_atoms") echo "WARNING: only $nonzero_atoms of $output_atoms are non-zero"
-
+        set output_atoms = `egrep "^ATOM|^HETAT" refmacout.pdb | wc -l`
+        set nonzero_atoms = `egrep "^ATOM|^HETAT" nonzero.pdb | wc -l`
+        if("$output_atoms" != "$nonzero_atoms") echo "WARNING: only $nonzero_atoms of $output_atoms are non-zero"
+    endif
 
     if($?NUDGE_OCC) then
-        set medB = `awk '/^ATOM|^HETAT/{print substr($0,61)+0}' $pdbin | sort -g | awk '{v[NR]=$1} END{print v[int(NR/2)]}'`
-        set madB = `awk -v medB=$medB '/^ATOM|^HETAT/{print sqrt((substr($0,61)-medB)^2)}' $pdbin | sort -g | awk '{v[NR]=$1} END{print v[int(NR/2)]}'`
-        set maxB = `awk '/^ATOM|^HETAT/{print substr($0,61)+0}' $pdbin | sort -gr | head -1`
-        set minB = `awk '/^ATOM|^HETAT/{print substr($0,61)+0}' $pdbin | sort -g | head -1`
+        awk '/^ATOM|^HETAT/{print substr($0,61)+0,substr($0,55)+0}' $pdbin >! ${tempfile}Blist.txt
+        set medB = `sort -g ${tempfile}Blist.txt | awk '$2>0{v[NR]=$1} END{print v[int(NR/2)]}'`
+        set madB = `awk -v medB=$medB '$2>0{print sqrt(($1-medB)^2)}' ${tempfile}Blist.txt | sort -g | awk '{v[NR]=$1} END{print v[int(NR/2)]}'`
+        if( "$madB" == "0") set madB = 1
+        set maxB = `sort -gr ${tempfile}Blist.txt |& awk '$2>0{print $1}' |& head -1`
+        set minB = `sort -g ${tempfile}Blist.txt |& awk '$2>0 && $2<1{print $1}' |& head -1`
         if("$user_maxB" != "") set maxB = $user_maxB
         if("$user_minB" != "") set minB = $user_minB
 
-        echo "BSTAT $maxB $minB $medB $madB" |\
+        echo "BSTAT $maxB $minB $medB $madB  $?KEEP_ZEROOCC  $hinudge $lonudge" |\
         cat - $pdbin |\
-        awk -v hinudge=$hinudge -v lonudge=$lonudge '\
-         /^BSTAT/{maxB=$2;minB=$3;medB=$4;madB=$5;next} ! /^ATOM|^HETAT/{print}\
+        awk '\
+         /^BSTAT/{maxB=$2;minB=$3;medB=$4;madB=$5;kz=$6;hinudge=$7;lonudge=$8;next}\
+       ! /^ATOM|^HETAT/{print}\
          /^ATOM|^HETAT/{O=substr($0,55,6)+0;B=substr($0,61)+0; \
            before=substr($0,1,54);after=substr($0,67)\
            deltaO=0;\
@@ -578,7 +821,8 @@ EOF-refmac
            if(B<=minB && minB<medB-lonudge*madB)deltaO=+0.01;\
            O+=deltaO;\
            if(O>1)O=1;\
-           if(O<0.01) next;\
+           if(O<0.01)O=0;\
+           if(O==0 && ! kz) next;\
            printf("%s%6.2f%6.2f%s\n",before,O,B,after);}' |\
         cat >! newocc.pdb
         set nudges = `diff newocc.pdb $pdbin | egrep '>' | wc -l`
@@ -590,20 +834,41 @@ EOF-refmac
     if($?PRUNE_HIGHB) then
         set medB = `awk '/^ATOM|^HETAT/{print substr($0,61)+0}' $pdbin | sort -g | awk '{v[NR]=$1} END{print v[int(NR/2)]}'`
         set madB = `awk -v medB=$medB '/^ATOM|^HETAT/{print sqrt((substr($0,61)-medB)^2)}' $pdbin | sort -g | awk '{v[NR]=$1} END{print v[int(NR/2)]}'`
-        set maxB = `awk '/^ATOM|^HETAT/{print substr($0,61)+0}' $pdbin | sort -gr | head -1`
+        set maxB = `awk '/^ATOM|^HETAT/{print substr($0,61)+0}' $pdbin | sort -gr |& head -1`
         set test = `echo $maxB $highB | awk '{print ($1+0>$2+0)}'`
         if($test) then
             cat $pdbin |\
             awk -v highB=$highB '/^ATOM|^HETAT/ && substr($0,61)+0>=highB{next}\
-               {print}' |\
+               ! /^ANISO/{print}' |\
             cat >! pruned.pdb
             cat $pdbin |\
-            awk -v highB=$highB '/^ATOM|^HETAT/ && substr($0,61)+0<highB{next}\
-               {print}' |\
-            cat >! highB.pdb
+            awk -v highB=$highB '/^ATOM|^HETAT/ && substr($0,61)+0<highB{print}' |\
+            tee -a highB.pdb
             set pdbin = pruned.pdb
             set atomsleft = `egrep "^ATOM|^HETAT" $pdbin | wc -l`
             echo "pruning B factors of $highB  (median = $medB +/- $madB max= $maxB).  $atomsleft atoms left"
+            set trials_since_damp = 0
+        endif
+    endif
+
+    if($?PRUNE_LOWOCC) then
+        set minocc = `awk '/^ATOM|^HETAT/{print substr($0,55)+0}' $pdbin | sort -g |& head -1`
+        set test = `echo $minocc $lowocc | awk '{print ($1+0<$2+0)}'`
+        if($test) then
+            cat $pdbin |\
+            awk -v lowocc=$lowocc '/^ATOM|^HETAT/ && substr($0,55)+0<lowocc{next}\
+               {print}' |\
+            cat >! occpruned.pdb
+            cat $pdbin |\
+            awk -v lowocc=$lowocc '/^ATOM|^HETAT/ && substr($0,55)+0>=lowocc{next}\
+               {print}' |\
+            cat >! ${tempfile}.pdb
+            set pruned = `egrep "^ATOM|^HETAT" ${tempfile}.pdb | wc -l`
+            grep "^ATOM|^HETAT" ${tempfile}.pdb >> refined_to_zero.pdb
+            rm -f ${tempfile}.pdb
+            set pdbin = occpruned.pdb
+            set atomsleft = `egrep "^ATOM|^HETAT" $pdbin | wc -l`
+            echo "pruning $pruned occupancies lower than $lowocc .  $atomsleft atoms left"
             set trials_since_damp = 0
         endif
     endif
@@ -645,7 +910,7 @@ EOF-refmac
     # apply scales to partial structures?
     if("$user_scale" != "") then
         # use the scaled Fobs
-        tac ${tempfile}.log |\
+        tac ${tempfile}.log |&\
         awk '/Overall / && /: scale = /' |\
         awk -F "=" '{print $2+0,$3+0;exit}' |\
         cat >! ${tempfile}scale.txt
@@ -653,11 +918,12 @@ EOF-refmac
         set B     = `awk '{print -$2}' ${tempfile}scale.txt`
         set B = 0
         echo "scaling $mtzfile by $scale $B"
-        cad hklin1 $mtzfile hklout ./refmac_nextin.mtz << EOF > /dev/null
+        cad hklin1 $mtzfile hklout ${tempfile}refmac_nextin.mtz << EOF > /dev/null
 scale file 1 $scale $B
 labin file 1 all
 EOF
-        set mtzfile = ./refmac_nextin.mtz
+        set mtzfile = ${tempfile}refmac_nextin.mtz
+        cp $mtzfile ./refmac_nextin.mtz
     endif
     cp -p $mtzfile ${tempfile}nextin.mtz 
     set partscales = `awk '/Data line--- SCPART/{print $4,$5,$6,$7}' ${tempfile}.log` 
@@ -669,7 +935,7 @@ EOF
             set Fpart = `echo $partscale $Fparts | awk '{n=$1;for(i=2;i<=NF;++i)if($i~"^FPART"n"="){print substr($i,8);exit}}'`
             set PHIpart = `echo $partscale $Fparts | awk '{n=$1;for(i=2;i<=NF;++i)if($i~"PHIP"n"="){print substr($i,7);exit}}'`
 
-            tac ${tempfile}.log |\
+            tac ${tempfile}.log |&\
             awk -v n=$refmacnum '/Partial structure / && /: scale = / && $3+0==n' |\
             awk -F "=" '{print $2+0,$3+0;exit}' |\
             cat >! ${tempfile}scale.txt
@@ -721,8 +987,46 @@ EOF
             endif
         end
     endif
-    mv ${tempfile}nextin.mtz ./refmac_nextin.mtz
-    set mtzfile = ./refmac_nextin.mtz
+    set mtzfile = ${tempfile}refmac_nextin.mtz
+    cp ${tempfile}nextin.mtz $mtzfile
+    cp $mtzfile ./refmac_nextin.mtz
+
+
+    # apply/suggest changes to matrix weight to achieve target x-ray weight
+    if("$xray_weight" != "" && "$weight_matrix" != "") then
+        # extract the refined value
+        tac ${tempfile}.log |&\
+        awk '/Actual weight /{print $3;exit}' |\
+        cat >! ${tempfile}weight.txt
+        set current = `head -n 1 ${tempfile}weight.txt`
+        rm -f ${tempfile}weight.txt
+        set ratio = `echo $xray_weight $current | awk '$1*$2>0{print $1/$2}'`
+        if( "$ratio" == "" ) set ratio = 1
+        set newmat = `echo $weight_matrix $ratio | awk '{print $1*$2}'`
+        echo "adjusting to weight matrix $newmat"
+        set weight_matrix = $newmat
+    endif
+
+
+
+    if(-e ./checkpoint/) then
+        # copy latest result to the checkpoint output
+        cp -p refmac_*.txt *.log ./checkpoint/
+    endif
+
+    # allow user-supplied code for flying updates
+    if(-x ./evaluate.com ) then
+        echo "running ./evaluate.com"
+        ./evaluate.com $pdbin
+        if( $status ) then
+            set evaluation_status = $status
+            echo "evaluate.com returns non-zero status, so we are done"
+            set moving = 0
+        else
+            echo "evaluate.com returns zero status, so we are not done"
+            set moving = 1
+        endif
+    endif
 
     if(! $?CONVERGE) set moving = 0
 
@@ -736,8 +1040,11 @@ EOF
         set test = `echo $since_minR $max_diverge | awk '{print ($1>$2)}'`
         if($test) then
             set DIVERGING
-            echo "things are getting worse! this will be the last time. "
-            if($?SALVAGE_LAST) cp -p refmacout_minR.pdb $pdbin
+            echo "things are getting worse! This will be the last time. "
+            if($?SALVAGE_LAST) then
+                echo "salvaging best Rwork: refmacout_minR.pdb"
+                cp -p refmacout_minR.pdb $pdbin
+            endif
             set last_time = 1
         endif
     endif
@@ -745,11 +1052,20 @@ EOF
 end
 
 
-set test = `echo $damp | awk '{print ($1<1)}'`
-if($test && ! $?converge_damped && ! $last_time) then
-    echo "loosening the damping factor a bit..."
-    set damp = `echo $damp $undamp_step | awk '{print $1*(1+$2)}' | awk '$1>1{$1=1} {print}'`
+set dampingX = `echo $damp $maxdXYZ | awk '{print ($1<0.5 && $2 !~ /=0$/ )}'`
+set dampingB = `echo $Bdamp $maxdB | awk '{print ($1<0.5 && $2 !~ /=0$/ )}'`
+set dampingO = `echo $occdamp $maxdocc | awk '{print ($1<0.5 && $2 !~ /=0$/ )}'`
+set damping = `echo $dampingX $dampingB $dampingO | awk '{print $1+$2+$3}'`
+if($damping && ! $?converge_damped && ! $last_time) then
+    echo "converged while damped, loosening the damping factors by $undamp_step ..."
+    set damp = `echo $damp $undamp_step | awk '{print $1*(1+$2)}' | awk '$1>0.5{$1=0.5} {print}'`
     set trials_since_damp = 0
+    if( $dampingB ) then
+        set Bdamp = `echo $Bdamp $undamp_step | awk '{print $1*(1+$2)}' | awk '$1>0.5{$1=0.5} {print}'`
+    endif
+    if( $dampingO ) then
+        set occdamp = `echo $occdamp $undamp_step | awk '{print $1*(1+$2)}' | awk '$1>0.5{$1=0.5} {print}'`
+    endif
     goto resume
 endif
 
@@ -758,15 +1074,38 @@ if("$Fparts" != "" && "$SCPART" == "" && "$SCPART_CARD" != "") then
 #    goto resume
 endif
 
+if($?DOFFT) then
 echo "labin F1=DELFWT PHI=PHDELWT" |\
  fft hklin refmacout.mtz mapout fofc.map > /dev/null
 #pick.com -6 fofc.map refmacout.pdb -top
+endif
 
 if($?DIVERGING) echo "refinement was diverging."
 if($trials_since_start == $max_trials) echo "maximum trials reached."
 
 exit:
+if( $?sleep_pid ) then
+  echo "sleep_pid = $sleep_pid "
+  if( "$sleep_pid" != "" ) then
+    ps $sleep_pid
+    set test = `ps $sleep_pid | grep sleep | wc -l`
+    if( $test ) then
+      echo "killing sleep $sleep_pid "
+      ( kill $sleep_pid ) >& /dev/null
+      echo "kill sleep status: $status "
+      rm -f refmac_stop.txt >& /dev/null
+    endif
+  endif
+endif
+
 if($?BAD) then
     echo "ERROR: $BAD"
     exit 9
 endif
+
+if($?CLEANUP_CCP4_SCR) then
+   rm -rf $CCP4_SCR
+endif
+
+exit
+
